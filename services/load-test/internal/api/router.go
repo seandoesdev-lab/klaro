@@ -1,6 +1,7 @@
 package api
 
 import (
+	_ "embed"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -9,6 +10,9 @@ import (
 	"github.com/klaro/load-test/internal/queue"
 	"github.com/klaro/load-test/internal/store"
 )
+
+//go:embed web/index.html
+var indexHTML []byte
 
 type Deps struct {
 	Store    *store.Store
@@ -24,6 +28,9 @@ func NewRouter(d Deps) *gin.Engine {
 	r.Use(gin.Recovery())
 
 	r.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
+
+	// 대시보드 UI는 인증 그룹 밖에서 같은 오리진으로 서빙(CORS 불필요)
+	r.GET("/", func(c *gin.Context) { c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML) })
 
 	// WS는 인증 그룹 밖에 등록(Task 8에서 실제 구현으로 교체)
 	registerWS(r, d)

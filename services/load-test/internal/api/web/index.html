@@ -1,0 +1,1039 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>klaro — 부하 테스트 대시보드</title>
+<style>
+  /* ============ 디자인 토큰 (프로토타입 원본 이식) ============ */
+  :root {
+    --bg: #F4F6FA; --surface: #FFFFFF; --surface-2: #ECF0F6;
+    --border: #DCE3EC; --border-strong: #C3CDDB;
+    --ink: #17202E; --ink-2: #46536B; --muted: #6B7A93;
+    --accent: #2F6FED; --accent-ink: #FFFFFF; --accent-soft: #E7EEFD;
+    --good: #12A150; --good-soft: #E2F5EA;
+    --warn: #C6820A; --warn-soft: #FBF1DC;
+    --crit: #D53A3F; --crit-soft: #FBE7E8;
+    --sev-high: #C05B14;
+    --s-p50: #0E9A92; --s-p95: #3B72E8; --s-p99: #8A5BD6;
+    --grid: #E4E9F1;
+    --shadow: 0 1px 2px rgba(23,32,46,.05), 0 4px 14px rgba(23,32,46,.06);
+    --radius: 10px;
+    --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0D1320; --surface: #151C2B; --surface-2: #1C2436;
+      --border: #273349; --border-strong: #35435E;
+      --ink: #E7EDF6; --ink-2: #AAB6CB; --muted: #7C89A3;
+      --accent: #6C8CFF; --accent-ink: #0D1320; --accent-soft: #1E2A4A;
+      --good: #3BC47E; --good-soft: #14301F;
+      --warn: #E5A93D; --warn-soft: #33270E;
+      --crit: #F26D71; --crit-soft: #3A1719;
+      --sev-high: #F0935A;
+      --s-p50: #2FC6BC; --s-p95: #6C8CFF; --s-p99: #B18AF2;
+      --grid: #202B40;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 14px rgba(0,0,0,.25);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0D1320; --surface: #151C2B; --surface-2: #1C2436;
+    --border: #273349; --border-strong: #35435E;
+    --ink: #E7EDF6; --ink-2: #AAB6CB; --muted: #7C89A3;
+    --accent: #6C8CFF; --accent-ink: #0D1320; --accent-soft: #1E2A4A;
+    --good: #3BC47E; --good-soft: #14301F;
+    --warn: #E5A93D; --warn-soft: #33270E;
+    --crit: #F26D71; --crit-soft: #3A1719;
+    --sev-high: #F0935A;
+    --s-p50: #2FC6BC; --s-p95: #6C8CFF; --s-p99: #B18AF2;
+    --grid: #202B40;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 14px rgba(0,0,0,.25);
+  }
+  :root[data-theme="light"] {
+    --bg: #F4F6FA; --surface: #FFFFFF; --surface-2: #ECF0F6;
+    --border: #DCE3EC; --border-strong: #C3CDDB;
+    --ink: #17202E; --ink-2: #46536B; --muted: #6B7A93;
+    --accent: #2F6FED; --accent-ink: #FFFFFF; --accent-soft: #E7EEFD;
+    --good: #12A150; --good-soft: #E2F5EA;
+    --warn: #C6820A; --warn-soft: #FBF1DC;
+    --crit: #D53A3F; --crit-soft: #FBE7E8;
+    --sev-high: #C05B14;
+    --s-p50: #0E9A92; --s-p95: #3B72E8; --s-p99: #8A5BD6;
+    --grid: #E4E9F1;
+    --shadow: 0 1px 2px rgba(23,32,46,.05), 0 4px 14px rgba(23,32,46,.06);
+  }
+
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 14px; line-height: 1.55; }
+  button { font-family: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .microlabel { font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  /* ============ 상단바 ============ */
+  .topbar {
+    position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 12px;
+    height: 52px; padding: 0 16px; background: var(--surface); border-bottom: 1px solid var(--border);
+  }
+  .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 16px; letter-spacing: -.01em; }
+  .brand-mark { width: 22px; height: 22px; border-radius: 6px; background: var(--accent); display: inline-flex; align-items: center; justify-content: center; color: var(--accent-ink); }
+  .live-chip {
+    display: none; align-items: center; gap: 7px; font-size: 12px; font-weight: 600;
+    color: var(--good); background: var(--good-soft); border: 1px solid transparent;
+    border-radius: 99px; padding: 3px 11px; cursor: pointer;
+  }
+  .live-chip.on { display: inline-flex; }
+  .live-chip.stopped { color: var(--crit); background: var(--crit-soft); }
+  .live-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: pulse 1.6s ease-in-out infinite; }
+  .live-chip.stopped .live-dot { animation: none; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+  .topbar-spacer { flex: 1; }
+  .theme-btn {
+    display: inline-flex; align-items: center; gap: 6px; background: var(--surface-2); color: var(--ink-2);
+    border: 1px solid var(--border); border-radius: 8px; padding: 5px 10px; font-size: 12px; cursor: pointer;
+  }
+  .theme-btn:hover { border-color: var(--border-strong); }
+  .avatar { width: 28px; height: 28px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; }
+
+  /* ============ 레이아웃 ============ */
+  main { padding: 22px 26px 60px; }
+  .view { max-width: 1100px; margin: 0 auto; }
+  .view[hidden] { display: none; }
+  .page-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 14px; margin-bottom: 16px; }
+  .page-head h1 { font-size: 20px; font-weight: 700; margin: 0; letter-spacing: -.01em; }
+  .page-sub { color: var(--muted); font-size: 13px; }
+  .crumbs { display: flex; gap: 7px; align-items: center; font-size: 12px; color: var(--muted); margin-bottom: 10px; flex-wrap: wrap; }
+  .crumbs .sep { opacity: .6; }
+  .crumbs button { background: none; border: 0; color: var(--accent); font-weight: 600; cursor: pointer; font-size: 12px; padding: 0; }
+  .crumbs button:hover { text-decoration: underline; }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px 18px; }
+  .card h2 { font-size: 14px; font-weight: 650; margin: 0 0 4px; }
+  .card .card-sub { font-size: 12px; color: var(--muted); margin: 0 0 12px; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .grid-32 { display: grid; grid-template-columns: 3fr 2fr; gap: 14px; }
+  .mt { margin-top: 14px; } .mb { margin-bottom: 14px; }
+
+  /* ============ KPI 타일 ============ */
+  .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 16px; }
+  .kpi { position: relative; overflow: hidden; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 13px 15px 13px 19px; }
+  .kpi::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--muted); }
+  .kpi.is-good::before { background: var(--good); }
+  .kpi.is-warn::before { background: var(--warn); }
+  .kpi.is-crit::before { background: var(--crit); }
+  .kpi.is-accent::before { background: var(--accent); }
+  .kpi-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .kpi-label { font-size: 12px; font-weight: 600; color: var(--ink-2); }
+  .kpi-value { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 25px; font-weight: 650; letter-spacing: -.02em; margin-top: 4px; }
+  .kpi-unit { font-size: 13px; color: var(--muted); font-weight: 500; margin-left: 2px; }
+  .kpi-trend { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); margin-top: 3px; }
+
+  .badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 650; border-radius: 99px; padding: 2px 9px; border: 1px solid transparent; white-space: nowrap; }
+  .badge-good { color: var(--good); background: var(--good-soft); }
+  .badge-warn { color: var(--warn); background: var(--warn-soft); }
+  .badge-crit { color: var(--crit); background: var(--crit-soft); }
+  .badge-mute { color: var(--muted); background: var(--surface-2); }
+  .badge-accent { color: var(--accent); background: var(--accent-soft); }
+
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; }
+  .dot-good { background: var(--good); } .dot-warn { background: var(--warn); } .dot-crit { background: var(--crit); }
+  .dot-mute { background: var(--muted); } .dot-accent { background: var(--accent); }
+  .dot.blink { animation: pulse 1.6s ease-in-out infinite; }
+
+  /* ============ 차트 ============ */
+  .chart-wrap { overflow-x: auto; }
+  .chart-wrap svg { display: block; width: 100%; min-width: 380px; height: auto; }
+  .chart-wrap text { fill: var(--muted); font-family: var(--mono); font-size: 10.5px; }
+  .chart-wrap .series-label { font-weight: 700; font-size: 11px; }
+  .chart-wrap.is-stale { opacity: .4; filter: grayscale(1); }
+  .chart-empty { display: flex; align-items: center; justify-content: center; height: 220px; color: var(--muted); font-size: 13px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 8px; font-size: 12px; color: var(--ink-2); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+  .stale-note { display: none; align-items: center; gap: 7px; font-size: 12.5px; color: var(--warn); margin-top: 8px; }
+  .stale-note.on { display: inline-flex; }
+
+  /* ============ 서킷 브레이커 / 안내 배너 ============ */
+  .cb-banner { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; border: 1px solid var(--border); border-left: 4px solid var(--good); background: var(--surface); border-radius: var(--radius); padding: 12px 16px; box-shadow: var(--shadow); }
+  .cb-banner.is-crit { border-left-color: var(--crit); background: var(--crit-soft); }
+  .cb-icon { flex: none; color: var(--good); display: inline-flex; }
+  .cb-banner.is-crit .cb-icon { color: var(--crit); }
+  .cb-text { flex: 1; min-width: 240px; }
+  .cb-title { font-weight: 650; font-size: 13.5px; display: block; }
+  .cb-desc { font-size: 12.5px; color: var(--ink-2); margin-top: 1px; display: block; }
+
+  /* ============ 버튼 ============ */
+  .btn { display: inline-flex; align-items: center; gap: 7px; border-radius: 8px; padding: 8px 15px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid var(--border); background: var(--surface); color: var(--ink-2); }
+  .btn:hover { border-color: var(--border-strong); color: var(--ink); }
+  .btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .btn-primary:hover { filter: brightness(1.07); color: var(--accent-ink); }
+  .btn-danger { color: var(--crit); border-color: var(--crit); background: transparent; }
+  .btn-danger:hover { background: var(--crit-soft); color: var(--crit); }
+  .btn[disabled] { opacity: .5; cursor: not-allowed; }
+  .btn-sm { padding: 4px 10px; font-size: 12px; }
+  .link { color: var(--accent); font-weight: 600; text-decoration: none; font-size: 13px; background: none; border: 0; padding: 0; cursor: pointer; }
+  .link:hover { text-decoration: underline; }
+
+  /* ============ 리포트 ============ */
+  .report-hero { display: grid; grid-template-columns: 210px 1fr; gap: 24px; align-items: center; }
+  .gauge-num { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 34px; font-weight: 700; fill: var(--ink); }
+  .gauge-den { font-family: var(--mono); font-size: 12px; fill: var(--muted); }
+  .verdict-scale { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 14px; }
+  .verdict { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--border); border-radius: 99px; padding: 5px 14px; font-size: 13px; font-weight: 600; color: var(--muted); background: var(--surface-2); opacity: .55; }
+  .verdict.active { opacity: 1; font-size: 14px; }
+  .verdict.v-good.active { color: var(--good); background: var(--good-soft); border-color: var(--good); }
+  .verdict.v-warn.active { color: var(--warn); background: var(--warn-soft); border-color: var(--warn); }
+  .verdict.v-crit.active { color: var(--crit); background: var(--crit-soft); border-color: var(--crit); }
+  .subscores { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 4px; }
+  .meter-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .meter-name { font-size: 13px; font-weight: 600; color: var(--ink-2); display: inline-flex; align-items: center; gap: 6px; }
+  .meter-val { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 20px; font-weight: 700; }
+  .meter-track { height: 6px; border-radius: 4px; background: var(--surface-2); margin-top: 9px; overflow: hidden; }
+  .meter-fill { height: 100%; border-radius: 4px; }
+  .limit-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
+  .limit-list li { display: flex; gap: 9px; font-size: 13px; }
+  .limit-list .k { color: var(--muted); flex: none; width: 128px; }
+  .limit-list .v { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--ink); }
+
+  /* ============ 폼 · 설정 ============ */
+  .url-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .url-row .input { flex: 1; min-width: 240px; font-family: var(--mono); }
+  .slider-row { display: grid; grid-template-columns: 120px 1fr 140px; gap: 14px; align-items: center; margin-top: 14px; }
+  .slider-row label { font-size: 13px; font-weight: 600; color: var(--ink-2); }
+  .slider-out { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 650; text-align: right; }
+  input[type="range"] { width: 100%; accent-color: var(--accent); height: 22px; }
+  .input { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 7px 11px; font-size: 13px; color: var(--ink); font-family: inherit; }
+  select.input { cursor: pointer; }
+  .usage-preview { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 16px; padding: 11px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
+  .usage-num { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 18px; font-weight: 700; }
+  .safety-note { display: flex; gap: 10px; align-items: flex-start; font-size: 12.5px; color: var(--ink-2); border: 1px solid var(--border); border-left: 4px solid var(--good); border-radius: 8px; padding: 10px 14px; background: var(--surface); margin-top: 16px; }
+  .safety-note .cb-icon { color: var(--good); margin-top: 1px; }
+  .inline-warn { display: none; align-items: flex-start; gap: 8px; font-size: 12.5px; color: var(--crit); background: var(--crit-soft); border: 1px solid transparent; border-radius: 8px; padding: 9px 12px; margin-top: 10px; }
+  .inline-warn.on { display: flex; }
+  .field-label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; font-weight: 600; }
+  .verify-box { border: 1px dashed var(--border-strong); border-radius: 8px; background: var(--surface-2); padding: 12px 14px; margin-top: 12px; }
+  .verify-box[hidden] { display: none; }
+  .kv { font-family: var(--mono); font-size: 12px; display: grid; grid-template-columns: 130px 1fr; gap: 4px 10px; margin: 8px 0; word-break: break-all; }
+  .kv .k { color: var(--muted); }
+  .dom-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+  .dom-item { display: flex; align-items: center; gap: 10px; font-size: 12.5px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+  .dom-item .d-name { font-family: var(--mono); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .empty-hint { text-align: center; color: var(--muted); font-size: 13px; padding: 10px; }
+
+  /* ============ 토스트 ============ */
+  .toast { position: fixed; right: 18px; bottom: 18px; z-index: 50; display: flex; gap: 10px; align-items: flex-start; max-width: 380px; padding: 13px 16px; background: var(--surface); color: var(--ink); border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 10px; box-shadow: var(--shadow); font-size: 13px; opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity .25s, transform .25s; }
+  .toast.t-crit { border-left-color: var(--crit); }
+  .toast.t-good { border-left-color: var(--good); }
+  .toast.show { opacity: 1; transform: translateY(0); pointer-events: auto; }
+
+  /* ============ 반응형 ============ */
+  @media (max-width: 900px) {
+    main { padding: 16px 14px 48px; }
+    .kpi-grid { grid-template-columns: 1fr 1fr; }
+    .grid-2, .grid-32 { grid-template-columns: 1fr; }
+    .subscores { grid-template-columns: 1fr; }
+    .report-hero { grid-template-columns: 1fr; justify-items: center; text-align: center; }
+    .verdict-scale { justify-content: center; }
+    .slider-row { grid-template-columns: 1fr; gap: 6px; }
+    .slider-out { text-align: left; }
+    .kv { grid-template-columns: 1fr; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<!-- ===================== 상단바 ===================== -->
+<header class="topbar">
+  <span class="brand">
+    <span class="brand-mark" aria-hidden="true">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>
+    </span>
+    klaro
+  </span>
+  <button class="live-chip" id="liveChip" type="button" data-action="goto-live" role="status">
+    <span class="live-dot" aria-hidden="true"></span>
+    <span id="liveChipText">LIVE</span>
+  </button>
+  <span class="topbar-spacer"></span>
+  <button class="theme-btn" id="themeToggle" type="button" aria-label="라이트/다크 테마 전환">
+    <svg id="iconMoon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"/></svg>
+    <svg id="iconSun" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+    <span id="themeLabel">테마</span>
+  </button>
+  <span class="avatar" aria-hidden="true">부</span>
+</header>
+
+<main>
+  <!-- ① 새 부하 테스트 폼 -->
+  <section class="view" id="view-form" aria-labelledby="h-form">
+    <div class="page-head">
+      <h1 id="h-form">새 부하 테스트</h1>
+      <span class="page-sub">검증된 도메인을 대상으로 안전하게 부하를 걸어 배포 적합성을 판정합니다.</span>
+    </div>
+
+    <div class="card mb">
+      <h2>대상 URL</h2>
+      <p class="card-sub">부하를 걸 엔드포인트를 입력하세요. 소유권이 확인된 도메인만 테스트할 수 있습니다.</p>
+      <div class="url-row">
+        <input class="input" id="targetUrl" type="url" inputmode="url" placeholder="https://example.com/" value="https://example.com/" aria-describedby="verifyBadge domainWarn">
+        <span id="verifyBadge" class="badge badge-mute" aria-live="polite">○ 확인 중…</span>
+      </div>
+      <div class="inline-warn" id="domainWarn">
+        <span aria-hidden="true">✕</span>
+        <span>이 도메인은 아직 소유권이 확인되지 않았습니다. <b>먼저 소유권을 확인하세요.</b> 아래에서 도메인을 등록하고 검증할 수 있습니다.</span>
+      </div>
+
+      <div class="mt">
+        <button class="link" id="toggleDomainMgr" type="button" aria-expanded="false">＋ 도메인 등록/검증</button>
+        <div class="verify-box" id="domainMgr" hidden>
+          <div class="grid-2">
+            <div>
+              <label class="field-label" for="domInput">도메인 (호스트)</label>
+              <input class="input" id="domInput" type="text" placeholder="example.com" style="width:100%">
+            </div>
+            <div>
+              <label class="field-label" for="domMethod">검증 방식</label>
+              <select class="input" id="domMethod" style="width:100%">
+                <option value="dns_txt">DNS TXT 레코드</option>
+                <option value="file">파일 업로드</option>
+              </select>
+            </div>
+          </div>
+          <div class="mt">
+            <button class="btn btn-primary btn-sm" id="btnRegisterDom" type="button">도메인 등록</button>
+          </div>
+          <div id="verifyInstr" hidden>
+            <div class="kv" id="verifyKv"></div>
+            <button class="btn btn-sm" id="btnVerifyDom" type="button">검증 확인 실행</button>
+          </div>
+          <div class="dom-list" id="domList" aria-live="polite"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card mb">
+      <h2>부하 설정 <span class="badge badge-mute">간단 모드</span></h2>
+      <p class="card-sub">가상 사용자 수와 지속 시간을 조절하세요. 실시간 예상 요청량이 아래에 표시됩니다.</p>
+
+      <div class="slider-row">
+        <label for="vuRange">가상 사용자(VU)</label>
+        <input type="range" id="vuRange" min="1" max="500" step="1" value="50" aria-describedby="vuOut">
+        <output class="slider-out" id="vuOut" for="vuRange">50 VU</output>
+      </div>
+      <div class="slider-row">
+        <label for="durRange">지속 시간</label>
+        <input type="range" id="durRange" min="10" max="600" step="10" value="60" aria-describedby="durOut">
+        <output class="slider-out" id="durOut" for="durRange">60초</output>
+      </div>
+      <div class="slider-row">
+        <label for="rampRange">램프업</label>
+        <input type="range" id="rampRange" min="0" max="120" step="5" value="10" aria-describedby="rampOut">
+        <output class="slider-out" id="rampOut" for="rampRange">10초</output>
+      </div>
+
+      <div class="usage-preview">
+        <span>예상 최대 처리량</span>
+        <span><span class="usage-num" id="usageEstimate">–</span> <span class="kpi-unit">req/s (VU 기준 추정)</span></span>
+      </div>
+
+      <div class="safety-note">
+        <span class="cb-icon" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6z"/><path d="M9 12l2 2 4-4"/></svg>
+        </span>
+        <span><b>안전 장치</b> · 대상 서버의 에러율이 <b>80%</b>를 초과하면 자동으로 테스트를 중단해 서버를 보호합니다. 서킷 브레이커가 상시 감시합니다.</span>
+      </div>
+
+      <div class="mt" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+        <button class="btn btn-primary" id="btnStart" type="button" disabled>부하 테스트 시작</button>
+        <span class="page-sub" id="startHint">대상 도메인 확인 후 시작할 수 있습니다.</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ② 실시간 대시보드 -->
+  <section class="view" id="view-live" aria-labelledby="h-live" hidden>
+    <div class="crumbs">
+      <button type="button" data-action="new-test">새 부하 테스트</button>
+      <span class="sep">/</span>
+      <span>실시간 모니터링</span>
+    </div>
+    <div class="page-head">
+      <h1 id="h-live">실시간 대시보드</h1>
+      <span class="page-sub num" id="liveTarget"></span>
+      <span class="topbar-spacer"></span>
+      <span class="page-sub num" id="liveClock" aria-live="off">00:00 / 00:00</span>
+    </div>
+
+    <div class="cb-banner mb" id="cbBanner">
+      <span class="cb-icon" id="cbIcon" aria-hidden="true">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6z"/><path d="M9 12l2 2 4-4"/></svg>
+      </span>
+      <span class="cb-text">
+        <span class="cb-title" id="cbTitle">서킷 브레이커 정상 감시 중</span>
+        <span class="cb-desc" id="cbDesc">대상 서버 상태를 실시간으로 감시하고 있으며, 위험 시 자동으로 안전하게 중단합니다.</span>
+      </span>
+      <span class="badge badge-accent" id="statusBadge"><span class="dot dot-accent blink"></span>실행 중</span>
+    </div>
+
+    <div class="kpi-grid" id="liveKpis" aria-live="polite">
+      <div class="kpi is-accent" id="kpiVu">
+        <div class="kpi-top"><span class="kpi-label">현재 VU</span></div>
+        <div class="kpi-value"><span class="v">–</span></div>
+        <div class="kpi-trend">동시 가상 사용자</div>
+      </div>
+      <div class="kpi is-accent" id="kpiRps">
+        <div class="kpi-top"><span class="kpi-label">RPS</span></div>
+        <div class="kpi-value"><span class="v">–</span> <span class="kpi-unit">req/s</span></div>
+        <div class="kpi-trend">초당 처리 요청</div>
+      </div>
+      <div class="kpi" id="kpiP95">
+        <div class="kpi-top"><span class="kpi-label">P95 지연</span><span class="badge badge-mute" id="p95Badge">–</span></div>
+        <div class="kpi-value"><span class="v">–</span> <span class="kpi-unit">ms</span></div>
+        <div class="kpi-trend" id="p95Trend">임계값 대비</div>
+      </div>
+      <div class="kpi" id="kpiErr">
+        <div class="kpi-top"><span class="kpi-label">에러율</span><span class="badge badge-mute" id="errBadge">–</span></div>
+        <div class="kpi-value"><span class="v">–</span> <span class="kpi-unit">%</span></div>
+        <div class="kpi-trend">실패 응답 비율</div>
+      </div>
+    </div>
+
+    <div class="card mb">
+      <h2>P95 지연 추이</h2>
+      <p class="card-sub">최근 30개 표본. 붉은 점선은 P95 임계값입니다.</p>
+      <div class="chart-wrap" id="latChartWrap">
+        <div class="chart-empty" id="latChartEmpty">첫 표본을 기다리는 중…</div>
+        <svg id="latChart" viewBox="0 0 720 260" role="img" aria-label="P95 지연 시간 추이 선형 차트" hidden></svg>
+      </div>
+      <div class="legend">
+        <span><i class="swatch" style="background:var(--s-p95)"></i> P95 지연 (ms)</span>
+        <span><i class="swatch" style="background:var(--crit)"></i> 임계값</span>
+      </div>
+      <div class="stale-note" id="staleNote"><span aria-hidden="true">⚠</span> 대상 응답 없음 — 스트림이 끊겼습니다.</div>
+    </div>
+
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <button class="btn btn-danger" id="btnAbort" type="button">테스트 중지</button>
+      <button class="btn" data-action="new-test" type="button">새 테스트</button>
+    </div>
+  </section>
+
+  <!-- ③ 결과/판정 카드 -->
+  <section class="view" id="view-result" aria-labelledby="h-result" hidden>
+    <div class="crumbs">
+      <button type="button" data-action="new-test">새 부하 테스트</button>
+      <span class="sep">/</span>
+      <span>결과 리포트</span>
+    </div>
+    <div class="page-head">
+      <h1 id="h-result">결과 · 배포 판정</h1>
+      <span class="page-sub num" id="resultTarget"></span>
+    </div>
+
+    <div class="cb-banner mb" id="resultAbortBanner" hidden>
+      <span class="cb-icon" aria-hidden="true">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6z"/><path d="M9 12l2 2 4-4"/></svg>
+      </span>
+      <span class="cb-text">
+        <span class="cb-title">안전 종료됨</span>
+        <span class="cb-desc" id="abortReasonText">서버 보호를 위해 테스트를 안전하게 중단했습니다.</span>
+      </span>
+    </div>
+
+    <div class="card mb">
+      <div class="report-hero">
+        <div style="text-align:center" id="gaugeBox"></div>
+        <div>
+          <div class="verdict-scale" id="verdictScale">
+            <span class="verdict v-good" data-v="good">🟢 배포 가능</span>
+            <span class="verdict v-warn" data-v="warn">⚠ 조건부</span>
+            <span class="verdict v-crit" data-v="crit">🔴 위험</span>
+          </div>
+          <p class="card-sub" id="verdictSummary" style="font-size:13.5px;color:var(--ink-2)"></p>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid-32 mb">
+      <div class="card">
+        <h2>핵심 지표</h2>
+        <p class="card-sub">응답 지연과 에러율 요약입니다.</p>
+        <div class="subscores">
+          <div>
+            <div class="meter-row"><span class="meter-name">P50</span><span class="meter-val" id="mP50">–</span></div>
+            <div class="meter-track"><span class="meter-fill" id="mP50bar" style="background:var(--s-p50);width:0"></span></div>
+          </div>
+          <div>
+            <div class="meter-row"><span class="meter-name">P95</span><span class="meter-val" id="mP95">–</span></div>
+            <div class="meter-track"><span class="meter-fill" id="mP95bar" style="background:var(--s-p95);width:0"></span></div>
+          </div>
+          <div>
+            <div class="meter-row"><span class="meter-name">P99</span><span class="meter-val" id="mP99">–</span></div>
+            <div class="meter-track"><span class="meter-fill" id="mP99bar" style="background:var(--s-p99);width:0"></span></div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>요약</h2>
+        <p class="card-sub">테스트 결과 개요입니다.</p>
+        <ul class="limit-list">
+          <li><span class="k">평균 RPS</span><span class="v" id="rRps">–</span></li>
+          <li><span class="k">에러율</span><span class="v" id="rErr">–</span></li>
+          <li><span class="k">저하 전 최대 VU</span><span class="v" id="rMaxVu">–</span></li>
+          <li><span class="k">병목 엔드포인트</span><span class="v" id="rBottleneck">–</span></li>
+        </ul>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <button class="btn btn-primary" data-action="new-test" type="button">새 부하 테스트</button>
+    </div>
+  </section>
+</main>
+
+<div class="toast" id="toast" role="alert" aria-live="assertive">
+  <span id="toastIcon" style="flex:none" aria-hidden="true"></span>
+  <span id="toastMsg"></span>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var REDUCED = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var root = document.documentElement;
+  var $ = function (id) { return document.getElementById(id); };
+
+  /* ================= 설정 ================= */
+  var PROJECT_ID = "00000000-0000-0000-0000-000000000002";
+  var TOKEN = "dev";
+  var BASE = window.location.origin;
+  var WINDOW = 30;          // 차트 슬라이딩 윈도 표본 수
+  var STALE_MS = 6000;      // 스트림 끊김 판정 시간
+  var POLL_MS = 2000;
+
+  /* ================= 상태 ================= */
+  var verifiedHosts = {};   // host -> true
+  var pendingDomain = null; // {id}
+  var testId = null, ws = null, pollTimer = null, clockTimer = null, staleTimer = null;
+  var p95Series = [], p95Threshold = 2000, startedAt = 0, totalSec = 0;
+  var terminated = false;
+
+  /* ================= 헬퍼 ================= */
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+  function pad2(n) { return (n < 10 ? "0" : "") + n; }
+  function mmss(sec) { sec = Math.max(0, Math.floor(sec)); return pad2(Math.floor(sec / 60)) + ":" + pad2(sec % 60); }
+  function hostOf(url) {
+    try { return new URL(url).hostname; } catch (e) { return ""; }
+  }
+  function verdictOf(score) {
+    if (score >= 85) return { cls: "good", label: "배포 가능", icon: "🟢" };
+    if (score >= 70) return { cls: "warn", label: "조건부 배포 가능", icon: "⚠" };
+    return { cls: "crit", label: "위험", icon: "🔴" };
+  }
+  var toastTimer = null;
+  function toast(msg, kind) {
+    var t = $("toast");
+    $("toastMsg").textContent = msg;
+    $("toastIcon").textContent = kind === "crit" ? "🛡" : kind === "good" ? "✓" : "ℹ";
+    t.className = "toast show" + (kind === "crit" ? " t-crit" : kind === "good" ? " t-good" : "");
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.className = t.className.replace(" show", ""); }, 4200);
+  }
+
+  /* ================= API ================= */
+  function api(method, path, body) {
+    var opts = { method: method, headers: { "Authorization": "Bearer " + TOKEN } };
+    if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+    return fetch(BASE + path, opts).then(function (res) {
+      return res.text().then(function (txt) {
+        var data = null;
+        try { data = txt ? JSON.parse(txt) : null; } catch (e) { data = null; }
+        if (!res.ok) {
+          var err = (data && data.error) || { code: "HTTP_" + res.status, message: res.statusText };
+          err.status = res.status;
+          throw err;
+        }
+        return data;
+      });
+    });
+  }
+
+  /* ================= 차트 (lineChartSVG 이식) ================= */
+  function lineChartSVG(el, cfg) {
+    var w = cfg.w, h = cfg.h, padL = 46, padR = cfg.padR || 56, padT = 14, padB = 26;
+    var plotH = h - padT - padB, plotW = w - padL - padR;
+    var yFor = function (v) { return padT + (1 - Math.min(v, cfg.max) / cfg.max) * plotH; };
+    var s = "";
+    cfg.ticks.forEach(function (t) {
+      var y = yFor(t.v);
+      s += '<line x1="' + padL + '" y1="' + y + '" x2="' + (w - padR) + '" y2="' + y + '" stroke="var(--grid)" stroke-width="1"/>';
+      s += '<text x="' + (padL - 8) + '" y="' + (y + 3.5) + '" text-anchor="end">' + t.label + "</text>";
+    });
+    if (cfg.threshold) {
+      var ty = yFor(cfg.threshold.v);
+      s += '<line x1="' + padL + '" y1="' + ty + '" x2="' + (w - padR) + '" y2="' + ty + '" stroke="var(--crit)" stroke-width="1.5" stroke-dasharray="5 5"/>';
+      s += '<text x="' + (w - padR + 6) + '" y="' + (ty - 5) + '" fill="var(--crit)" class="series-label">' + cfg.threshold.label + "</text>";
+    }
+    cfg.series.forEach(function (sr) {
+      var pts = [];
+      var n = sr.d.length;
+      for (var i = 0; i < n; i++) {
+        var x = n === 1 ? padL + plotW : padL + (i / (n - 1)) * plotW;
+        pts.push(x.toFixed(1) + "," + yFor(sr.d[i]).toFixed(1));
+      }
+      if (cfg.area) {
+        s += '<path d="M' + padL + "," + (h - padB) + " L" + pts.join(" L") + " L" + (w - padR) + "," + (h - padB) + ' Z" fill="' + sr.c + '" opacity="0.16"/>';
+      }
+      s += '<polyline fill="none" stroke="' + sr.c + '" stroke-width="2" stroke-linejoin="round" points="' + pts.join(" ") + '"/>';
+      if (cfg.endDot) {
+        var lp = pts[pts.length - 1].split(",");
+        s += '<circle cx="' + lp[0] + '" cy="' + lp[1] + '" r="4" fill="' + sr.c + '" stroke="var(--surface)" stroke-width="2"/>';
+      }
+    });
+    el.innerHTML = s;
+  }
+
+  function gaugeSVG(score, colorVar, size) {
+    size = size || 170;
+    var dash = (score / 100) * 402.1;
+    return '<svg viewBox="0 0 160 160" width="' + size + '" height="' + size + '" role="img" aria-label="종합 배포 적합성 점수 ' + score + '점 (100점 만점)">' +
+      '<circle cx="80" cy="80" r="64" fill="none" stroke="var(--surface-2)" stroke-width="14"/>' +
+      '<circle cx="80" cy="80" r="64" fill="none" stroke="var(--' + colorVar + ')" stroke-width="14" stroke-linecap="round" stroke-dasharray="' + dash.toFixed(1) + ' 402.1" transform="rotate(-90 80 80)"/>' +
+      '<text x="80" y="82" text-anchor="middle" class="gauge-num">' + score + "</text>" +
+      '<text x="80" y="102" text-anchor="middle" class="gauge-den">/ 100</text></svg>';
+  }
+
+  function renderChart() {
+    var svg = $("latChart"), empty = $("latChartEmpty");
+    if (p95Series.length < 2) { svg.hidden = true; empty.hidden = false; return; }
+    empty.hidden = true; svg.hidden = false;
+    var maxData = Math.max.apply(null, p95Series);
+    var max = Math.max(p95Threshold * 1.25, maxData * 1.15, 50);
+    var ticks = [
+      { v: 0, label: "0" },
+      { v: max / 2, label: String(Math.round(max / 2)) },
+      { v: max, label: String(Math.round(max)) }
+    ];
+    lineChartSVG(svg, {
+      w: 720, h: 260, max: max, ticks: ticks, endDot: true,
+      threshold: { v: p95Threshold, label: "임계 " + p95Threshold + "ms" },
+      series: [{ d: p95Series.slice(), c: "var(--s-p95)" }]
+    });
+  }
+
+  /* ================= 화면 전환 ================= */
+  function show(view) {
+    ["form", "live", "result"].forEach(function (v) { $("view-" + v).hidden = (v !== view); });
+    window.scrollTo(0, 0);
+  }
+
+  /* ================= 도메인 ================= */
+  function refreshDomains() {
+    return api("GET", "/projects/" + PROJECT_ID + "/domains").then(function (res) {
+      var items = (res && res.data) || [];
+      verifiedHosts = {};
+      var list = $("domList"); list.innerHTML = "";
+      if (!items.length) { list.innerHTML = '<div class="empty-hint">등록된 도메인이 없습니다.</div>'; }
+      items.forEach(function (d) {
+        var ok = d.status === "verified" || !!d.verified_at;
+        if (ok) verifiedHosts[d.domain] = true;
+        var row = document.createElement("div");
+        row.className = "dom-item";
+        row.innerHTML = '<span class="dot ' + (ok ? "dot-good" : "dot-warn") + '" aria-hidden="true"></span>' +
+          '<span class="d-name">' + esc(d.domain) + '</span>' +
+          (ok ? '<span class="badge badge-good">✓ 검증됨</span>'
+              : '<span class="badge badge-warn">⚠ 미검증</span>' +
+                '<button class="btn btn-sm" data-verify="' + esc(d.id) + '" type="button">검증</button>');
+        list.appendChild(row);
+      });
+      evaluateTarget();
+    }).catch(function (e) {
+      toast("도메인 목록을 불러오지 못했습니다: " + (e.message || e.code), "crit");
+    });
+  }
+
+  function evaluateTarget() {
+    var url = $("targetUrl").value.trim();
+    var host = hostOf(url);
+    var badge = $("verifyBadge"), warn = $("domainWarn"), btn = $("btnStart"), hint = $("startHint");
+    if (!host) {
+      badge.className = "badge badge-mute"; badge.textContent = "○ URL 입력";
+      warn.className = "inline-warn"; btn.disabled = true; hint.textContent = "유효한 URL을 입력하세요."; return;
+    }
+    if (verifiedHosts[host]) {
+      badge.className = "badge badge-good"; badge.textContent = "✓ 검증됨";
+      warn.className = "inline-warn"; btn.disabled = false; hint.textContent = host + " 소유권이 확인되었습니다.";
+    } else {
+      badge.className = "badge badge-crit"; badge.textContent = "✕ 미검증";
+      warn.className = "inline-warn on"; btn.disabled = true; hint.textContent = "먼저 소유권을 확인하세요.";
+    }
+  }
+
+  function registerDomain() {
+    var domain = $("domInput").value.trim();
+    var method = $("domMethod").value;
+    if (!domain) { toast("도메인을 입력하세요.", "crit"); return; }
+    api("POST", "/projects/" + PROJECT_ID + "/domains", { domain: domain, method: method }).then(function (res) {
+      pendingDomain = { id: res.id };
+      var v = res.verification || {};
+      var kv = $("verifyKv");
+      if (method === "dns_txt") {
+        kv.innerHTML = '<span class="k">레코드 이름</span><span>' + esc(v.record_name || "") + '</span>' +
+          '<span class="k">레코드 값</span><span>' + esc(v.record_value || "") + '</span>';
+      } else {
+        kv.innerHTML = '<span class="k">파일 경로</span><span>' + esc(v.file_path || "") + '</span>' +
+          '<span class="k">파일 내용</span><span>' + esc(v.file_content || "") + '</span>';
+      }
+      $("verifyInstr").hidden = false;
+      toast("도메인이 등록되었습니다. 안내대로 검증 정보를 설정한 뒤 검증을 실행하세요.", "good");
+      refreshDomains();
+    }).catch(function (e) {
+      toast("도메인 등록 실패: " + (e.message || e.code), "crit");
+    });
+  }
+
+  function verifyDomain(id) {
+    api("POST", "/projects/" + PROJECT_ID + "/domains/" + id + "/verify").then(function () {
+      toast("도메인이 검증되었습니다.", "good");
+      $("verifyInstr").hidden = true;
+      refreshDomains();
+    }).catch(function (e) {
+      toast("검증 실패: " + (e.message || e.code) + " — 검증 정보 설정을 확인하세요.", "crit");
+      refreshDomains();
+    });
+  }
+
+  /* ================= 슬라이더 ================= */
+  function updateUsage() {
+    var vu = +$("vuRange").value;
+    $("vuOut").textContent = vu + " VU";
+    $("durOut").textContent = +$("durRange").value + "초";
+    $("rampOut").textContent = +$("rampRange").value + "초";
+    // 추정: VU당 초당 약 1 요청 가정 (지연 100ms 기준 상한과 무관한 대략치)
+    $("usageEstimate").textContent = "~" + (vu * 5).toLocaleString("ko-KR");
+  }
+
+  /* ================= 테스트 시작 ================= */
+  function startTest() {
+    var url = $("targetUrl").value.trim();
+    var vu = +$("vuRange").value, dur = +$("durRange").value, ramp = +$("rampRange").value;
+    p95Threshold = 2000;
+    var scenario = {
+      vu: vu, duration_sec: dur, ramp_up_sec: ramp,
+      steps: [{ method: "GET", path: (function () { try { return new URL(url).pathname || "/"; } catch (e) { return "/"; } })() }],
+      thresholds: { error_rate: 0.5, http_req_duration_p95_ms: p95Threshold }
+    };
+    $("btnStart").disabled = true;
+    api("POST", "/projects/" + PROJECT_ID + "/load-tests", { target_url: url, scenario: scenario }).then(function (res) {
+      testId = res.id;
+      totalSec = dur; startedAt = Date.now();
+      terminated = false;
+      p95Series = [];
+      enterLive(url);
+    }).catch(function (e) {
+      $("btnStart").disabled = false;
+      if (e.code === "DOMAIN_NOT_VERIFIED") { toast("대상 도메인이 미검증 상태입니다. 먼저 소유권을 확인하세요.", "crit"); evaluateTarget(); }
+      else toast("테스트 생성 실패: " + (e.message || e.code), "crit");
+    });
+  }
+
+  function enterLive(url) {
+    show("live");
+    $("liveTarget").textContent = url;
+    $("liveChip").className = "live-chip on";
+    $("liveChipText").textContent = "LIVE";
+    // reset banners/KPIs
+    setCB(false);
+    $("statusBadge").innerHTML = '<span class="dot dot-accent blink"></span>실행 중';
+    $("statusBadge").className = "badge badge-accent";
+    setStale(false);
+    resetKpis();
+    renderChart();
+    updateClock();
+    clockTimer = setInterval(updateClock, 1000);
+    connectWS();
+    pollTimer = setInterval(pollStatus, POLL_MS);
+    bumpStale();
+  }
+
+  function resetKpis() {
+    setKpi("kpiVu", "–", "is-accent"); setKpi("kpiRps", "–", "is-accent");
+    setKpi("kpiP95", "–", ""); setKpi("kpiErr", "–", "");
+    $("p95Badge").className = "badge badge-mute"; $("p95Badge").textContent = "–";
+    $("errBadge").className = "badge badge-mute"; $("errBadge").textContent = "–";
+  }
+  function setKpi(id, val, cls) {
+    var el = $(id);
+    el.className = "kpi" + (cls ? " " + cls : "");
+    el.querySelector(".v").textContent = val;
+  }
+
+  function updateClock() {
+    var el = $("liveClock");
+    var elapsed = (Date.now() - startedAt) / 1000;
+    el.textContent = mmss(elapsed) + " / " + mmss(totalSec);
+  }
+
+  /* ================= WebSocket (인증 헤더 없음) ================= */
+  function connectWS() {
+    var proto = window.location.protocol === "https:" ? "wss" : "ws";
+    var url = proto + "://" + window.location.host + "/load-tests/" + testId + "/stream";
+    try { ws = new WebSocket(url); } catch (e) { return; }
+    ws.onmessage = function (ev) {
+      var m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (m.event === "aborted") { onAbort(m.reason); return; }
+      onMetric(m);
+    };
+    ws.onclose = function () { ws = null; };
+    ws.onerror = function () {};
+  }
+
+  function onMetric(m) {
+    bumpStale();
+    setStale(false);
+    var vu = m.active_vu != null ? m.active_vu : 0;
+    var rps = m.rps != null ? m.rps : 0;
+    var p95 = m.latency_p95_ms != null ? m.latency_p95_ms : 0;
+    var err = m.error_rate != null ? m.error_rate : 0;
+
+    setKpi("kpiVu", vu.toLocaleString("ko-KR"), "is-accent");
+    setKpi("kpiRps", (Math.round(rps * 10) / 10).toLocaleString("ko-KR"), "is-accent");
+
+    // P95 상태색
+    var p95Cls = "is-good", p95Badge = "badge-good", p95Txt = "정상";
+    if (p95 > p95Threshold) { p95Cls = "is-crit"; p95Badge = "badge-crit"; p95Txt = "임계 초과"; }
+    else if (p95 > p95Threshold * 0.75) { p95Cls = "is-warn"; p95Badge = "badge-warn"; p95Txt = "주의"; }
+    setKpi("kpiP95", Math.round(p95).toLocaleString("ko-KR"), p95Cls);
+    $("p95Badge").className = "badge " + p95Badge; $("p95Badge").textContent = p95Txt;
+    $("p95Trend").textContent = "임계값 " + p95Threshold + "ms 대비";
+
+    // 에러율 상태색: >0.2 crit, >0.05 warn
+    var errPct = Math.round(err * 1000) / 10;
+    var errCls = "is-good", errBadge = "badge-good", errTxt = "정상";
+    if (err > 0.2) { errCls = "is-crit"; errBadge = "badge-crit"; errTxt = "위험"; }
+    else if (err > 0.05) { errCls = "is-warn"; errBadge = "badge-warn"; errTxt = "주의"; }
+    setKpi("kpiErr", errPct.toLocaleString("ko-KR"), errCls);
+    $("errBadge").className = "badge " + errBadge; $("errBadge").textContent = errTxt;
+
+    p95Series.push(p95);
+    if (p95Series.length > WINDOW) p95Series.shift();
+    renderChart();
+  }
+
+  /* ================= 스트림 끊김 ================= */
+  function bumpStale() {
+    if (staleTimer) clearTimeout(staleTimer);
+    staleTimer = setTimeout(function () { if (!terminated) setStale(true); }, STALE_MS);
+  }
+  function setStale(on) {
+    $("staleNote").className = "stale-note" + (on ? " on" : "");
+    $("latChartWrap").classList.toggle("is-stale", on);
+    if (on) {
+      $("liveChip").className = "live-chip on stopped";
+      $("liveChipText").textContent = "응답 없음";
+    } else if (!terminated) {
+      $("liveChip").className = "live-chip on";
+      $("liveChipText").textContent = "LIVE";
+    }
+  }
+
+  /* ================= 서킷 브레이커 ================= */
+  function setCB(tripped, reason) {
+    var b = $("cbBanner");
+    if (tripped) {
+      b.className = "cb-banner is-crit mb";
+      $("cbTitle").textContent = "서킷 브레이커 발동 — 안전 종료";
+      $("cbDesc").textContent = reason ? ("사유: " + reason) : "대상 서버를 보호하기 위해 테스트를 안전하게 중단했습니다.";
+    } else {
+      b.className = "cb-banner mb";
+      $("cbTitle").textContent = "서킷 브레이커 정상 감시 중";
+      $("cbDesc").textContent = "대상 서버 상태를 실시간으로 감시하고 있으며, 위험 시 자동으로 안전하게 중단합니다.";
+    }
+  }
+
+  function onAbort(reason) {
+    if (terminated) return;
+    setCB(true, reason);
+    $("statusBadge").innerHTML = "🛡 안전 종료";
+    $("statusBadge").className = "badge badge-crit";
+    toast("대상 서버를 보호하기 위해 안전하게 중단했어요", "crit");
+    finishTest("aborted", reason);
+  }
+
+  /* ================= 상태 폴링 ================= */
+  function pollStatus() {
+    if (!testId) return;
+    api("GET", "/load-tests/" + testId).then(function (lt) {
+      var st = lt.status;
+      if (st === "completed" || st === "failed" || st === "aborted" || st === "rejected") {
+        finishTest(st, lt.aborted_reason);
+      }
+    }).catch(function () {});
+  }
+
+  /* ================= 종료 처리 ================= */
+  function stopStreams() {
+    if (ws) { try { ws.close(); } catch (e) {} ws = null; }
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
+    if (staleTimer) { clearTimeout(staleTimer); staleTimer = null; }
+  }
+
+  function finishTest(status, reason) {
+    if (terminated) return;
+    terminated = true;
+    stopStreams();
+    $("liveChip").className = "live-chip on stopped";
+    $("liveChipText").textContent = status === "completed" ? "완료" : "종료됨";
+
+    if (status === "completed" || status === "aborted") {
+      api("GET", "/load-tests/" + testId + "/results").then(function (r) {
+        showResult(r, status, reason);
+      }).catch(function () {
+        showResult(null, status, reason);
+      });
+    } else {
+      // failed / rejected: 결과 없음
+      showResult(null, status, reason);
+    }
+  }
+
+  /* ================= 결과/판정 ================= */
+  function scoreOf(r) {
+    // 100점 시작, 에러율·P95 초과에 감점
+    var score = 100;
+    var err = r.error_rate || 0;
+    var p95 = r.latency_p95 || 0;
+    score -= Math.min(60, err * 300);                       // 에러율 20% => -60
+    if (p95 > p95Threshold) score -= Math.min(40, ((p95 - p95Threshold) / p95Threshold) * 40);
+    else score -= (p95 / p95Threshold) * 12;                // 임계 근접도 소폭 감점
+    return Math.max(0, Math.min(100, Math.round(score)));
+  }
+
+  function showResult(r, status, reason) {
+    show("result");
+    $("resultTarget").textContent = $("liveTarget").textContent;
+    var abortBanner = $("resultAbortBanner");
+    if (status === "aborted") {
+      abortBanner.hidden = false;
+      $("abortReasonText").textContent = reason ? ("사유: " + reason + " · 서버 보호를 위해 안전하게 중단했습니다.")
+        : "서버 보호를 위해 테스트를 안전하게 중단했습니다.";
+    } else { abortBanner.hidden = true; }
+
+    if (!r) {
+      // 결과 데이터 없음 (failed/rejected 또는 조회 실패)
+      $("gaugeBox").innerHTML = gaugeSVG(0, "crit");
+      setVerdict("crit");
+      $("verdictSummary").textContent = status === "failed" ? "테스트가 실패하여 결과를 집계하지 못했습니다."
+        : status === "rejected" ? "테스트가 거부되었습니다." : "부분 결과를 집계하지 못했습니다.";
+      ["mP50", "mP95", "mP99", "rRps", "rErr", "rMaxVu", "rBottleneck"].forEach(function (id) { $(id).textContent = "–"; });
+      return;
+    }
+
+    var score = scoreOf(r);
+    var v = verdictOf(score);
+    $("gaugeBox").innerHTML = gaugeSVG(score, v.cls);
+    setVerdict(v.cls);
+    var errPct = (Math.round((r.error_rate || 0) * 1000) / 10);
+    $("verdictSummary").innerHTML = "<b>" + v.icon + " " + v.label + "</b> · 평균 RPS " +
+      Math.round(r.rps_avg || 0).toLocaleString("ko-KR") + ", P95 " + Math.round(r.latency_p95 || 0).toLocaleString("ko-KR") +
+      "ms, 에러율 " + errPct + "%. " +
+      (v.cls === "good" ? "임계값 이내로 안정적입니다." : v.cls === "warn" ? "일부 지표가 임계에 근접합니다. 조건부 배포를 검토하세요." : "임계값을 초과했습니다. 배포 전 개선이 필요합니다.");
+
+    // 지연 미터 (max = P99 또는 임계값 기준)
+    var mMax = Math.max(r.latency_p99 || 0, p95Threshold) * 1.1 || 1;
+    $("mP50").textContent = Math.round(r.latency_p50 || 0).toLocaleString("ko-KR") + "ms";
+    $("mP95").textContent = Math.round(r.latency_p95 || 0).toLocaleString("ko-KR") + "ms";
+    $("mP99").textContent = Math.round(r.latency_p99 || 0).toLocaleString("ko-KR") + "ms";
+    $("mP50bar").style.width = Math.min(100, (r.latency_p50 || 0) / mMax * 100) + "%";
+    $("mP95bar").style.width = Math.min(100, (r.latency_p95 || 0) / mMax * 100) + "%";
+    $("mP99bar").style.width = Math.min(100, (r.latency_p99 || 0) / mMax * 100) + "%";
+
+    $("rRps").textContent = (Math.round((r.rps_avg || 0) * 10) / 10).toLocaleString("ko-KR") + " req/s";
+    $("rErr").textContent = errPct + " %";
+    $("rMaxVu").textContent = (r.max_vu_before_degradation || 0).toLocaleString("ko-KR") + " VU";
+    $("rBottleneck").textContent = r.bottleneck_endpoint || "—";
+  }
+
+  function setVerdict(cls) {
+    var scale = $("verdictScale").querySelectorAll(".verdict");
+    scale.forEach(function (el) { el.classList.toggle("active", el.getAttribute("data-v") === cls); });
+  }
+
+  /* ================= 중지 ================= */
+  function abortTest() {
+    if (!testId) return;
+    $("btnAbort").disabled = true;
+    api("POST", "/load-tests/" + testId + "/abort").then(function () {
+      toast("중지를 요청했습니다. 안전하게 마무리하는 중입니다.", "good");
+    }).catch(function (e) {
+      $("btnAbort").disabled = false;
+      toast("중지 요청 실패: " + (e.message || e.code), "crit");
+    });
+  }
+
+  function resetToForm() {
+    stopStreams();
+    testId = null; terminated = false; p95Series = [];
+    $("liveChip").className = "live-chip";
+    $("btnStart").disabled = false;
+    $("btnAbort").disabled = false;
+    show("form");
+    refreshDomains();
+  }
+
+  /* ================= 테마 ================= */
+  function applyTheme(mode) {
+    if (mode) root.setAttribute("data-theme", mode);
+    var dark = (root.getAttribute("data-theme") === "dark") ||
+      (!root.getAttribute("data-theme") && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    $("iconMoon").hidden = dark; $("iconSun").hidden = !dark;
+    $("themeLabel").textContent = dark ? "라이트" : "다크";
+  }
+  function toggleTheme() {
+    var cur = root.getAttribute("data-theme");
+    var dark = (cur === "dark") || (!cur && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    applyTheme(dark ? "light" : "dark");
+    try { localStorage.setItem("klaro-theme", root.getAttribute("data-theme")); } catch (e) {}
+  }
+
+  /* ================= 이벤트 바인딩 ================= */
+  function bind() {
+    ["vuRange", "durRange", "rampRange"].forEach(function (id) { $(id).addEventListener("input", updateUsage); });
+    $("targetUrl").addEventListener("input", evaluateTarget);
+    $("btnStart").addEventListener("click", startTest);
+    $("btnAbort").addEventListener("click", abortTest);
+    $("btnRegisterDom").addEventListener("click", registerDomain);
+    $("btnVerifyDom").addEventListener("click", function () { if (pendingDomain) verifyDomain(pendingDomain.id); });
+    $("toggleDomainMgr").addEventListener("click", function () {
+      var box = $("domainMgr"); var open = box.hidden;
+      box.hidden = !open; this.setAttribute("aria-expanded", String(open));
+    });
+    $("domList").addEventListener("click", function (e) {
+      var b = e.target.closest("[data-verify]"); if (b) verifyDomain(b.getAttribute("data-verify"));
+    });
+    $("themeToggle").addEventListener("click", toggleTheme);
+    document.addEventListener("click", function (e) {
+      var a = e.target.closest("[data-action]"); if (!a) return;
+      var act = a.getAttribute("data-action");
+      if (act === "new-test") resetToForm();
+      else if (act === "goto-live" && testId && !terminated) show("live");
+    });
+  }
+
+  /* ================= 초기화 ================= */
+  function init() {
+    try { var t = localStorage.getItem("klaro-theme"); if (t) root.setAttribute("data-theme", t); } catch (e) {}
+    applyTheme();
+    bind();
+    updateUsage();
+    show("form");
+    refreshDomains();
+  }
+  init();
+})();
+</script>
