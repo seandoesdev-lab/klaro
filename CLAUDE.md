@@ -4,14 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 저장소 성격 (중요)
 
-이 저장소는 현재 **설계 단계**다. 애플리케이션 코드·빌드 시스템·테스트·패키지 매니페스트가 **아직 없다**. 존재하는 것은:
+이 저장소는 **설계 문서 + 초기 구현이 공존**하는 단계다.
 
 - `docs/klaro/*.md` — 설계 문서 6종 (이 프로젝트의 **단일 진실 공급원 / source of truth**)
 - `docs/klaro/prototype.html` — 단일 파일 화면 프로토타입 (React/빌드 없이 순수 HTML+CSS+JS, 디자인 토큰·화면 레이아웃 검증용)
+- `services/load-test/` — **부하 테스트 서비스(S1) MVP 구현**(Go). 실제 코드·테스트·docker-compose 존재. 빌드/테스트는 이 디렉토리 기준.
+- `_workspace/` — 하네스 실행 중간 산출물(요구사항 계약·아키텍처 설계). 감사 추적용, 삭제 금지.
 
-따라서 "빌드/린트/테스트 명령"은 아직 정의되지 않았다. 구현 착수 시 스택 결정이 먼저다(아래 §미확정 사항).
-
-문서는 **한국어**로 작성되어 있고, 이 저장소에서 이어지는 산출물도 한국어 기준으로 맞춘다.
+새 서비스 착수 시에는 여전히 스택 결정이 먼저다(아래 §미확정 사항). 문서는 **한국어**로 작성되어 있고, 이어지는 산출물도 한국어 기준으로 맞춘다.
 
 ## 문서 지도
 
@@ -26,7 +26,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `docs/klaro/04-cost-model.md` | 무비용 개발 원칙·비용 통제(FinOps) |
 | `docs/klaro/05-ui-ux-design.md` | 화면 설계·디자인 토큰·상태 디자인·핸드오프 노트 |
 
-`prototype.html`은 `05-ui-ux-design.md`의 시각 구현체다. 디자인 토큰(색상 변수, 라이트/다크 테마)이 두 곳에 함께 존재하므로 한쪽을 바꾸면 다른 쪽도 동기화한다.
+`prototype.html`은 `05-ui-ux-design.md`의 시각 구현체다. 디자인 토큰(색상 변수, 라이트/다크 테마)이 두 곳에 함께 존재하므로 한쪽을 바꾸면 다른 쪽도 동기화한다. 구현 관련 설계/계획은 `docs/superpowers/`에도 있다.
 
 ## 제품 개요
 
@@ -69,7 +69,7 @@ MinIO는 S3 API 호환이므로, 스토리지 접근은 S3 SDK로 작성해 프�
 
 각 문서 말미의 "착수 전 확정 필요" 절에 모여 있다. 핵심:
 
-- **Control Plane 언어**: Go(Gin/Echo) vs NestJS(TS)
+- **Control Plane 언어**: Go(Gin/Echo) vs NestJS(TS) — *S1은 Go 채택(`services/load-test/`)*
 - **로컬 오케스트레이션**: Docker Compose(단순) vs 로컬 K8s(프로덕션 근접)
 - **메시지 큐**: NATS JetStream vs Kafka
 - **Bedrock**: 사용할 Claude 모델·리전·토큰 예산 상한
@@ -83,7 +83,14 @@ MinIO는 S3 API 호환이므로, 스토리지 접근은 S3 SDK로 작성해 프�
 
 **트리거:** klaro 기능/서비스 구현·개발·빌드 요청 시(부하/스캔/APM/리포트/과금/대시보드, 후속 "재실행·수정·보완" 포함) `klaro-build` 스킬을 사용하라. 단순 질문은 직접 응답 가능.
 
+## 하네스: klaro 프런트엔드 디자인
+
+**목표:** 확정된 klaro 디자인 시스템(프로토타입·UI/UX 명세)을 재사용해 실제 API에 연결되는 대시보드 화면을 일관되게 구현한다.
+
+**트리거:** klaro 대시보드/화면/UI 생성·수정·재실행·보완 요청 시 `klaro-frontend-orchestrator` 스킬을 사용하라. 단순 질문은 직접 응답 가능.
+
 **변경 이력:**
 | 날짜 | 변경 내용 | 대상 | 사유 |
 |------|----------|------|------|
-| 2026-07-19 | 초기 구성 (통합 하네스: 에이전트 6 + 스킬 6 + 오케스트레이터 1) | 전체 | - |
+| 2026-07-19 | 초기 구성 (통합 하네스: 에이전트 6 + 스킬 6 + 오케스트레이터 klaro-build) | 전체 | 명세→구현→검증 개발 하네스 구축 |
+| 2026-07-19 | 초기 구성 (designer/qa 에이전트 + dashboard-design 스킬 + orchestrator) | 전체 | 부하 테스트 대시보드 프런트엔드 하네스 구축 |
