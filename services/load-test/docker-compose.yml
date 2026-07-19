@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: klaro
+      POSTGRES_PASSWORD: klaro
+      POSTGRES_DB: klaro
+    ports: ["5432:5432"]
+    volumes:
+      - ./migrations/0001_init.sql:/docker-entrypoint-initdb.d/0001_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U klaro"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7
+    ports: ["6379:6379"]
+
+  api:
+    build: { context: ., dockerfile: Dockerfile.api }
+    environment:
+      DATABASE_URL: postgres://klaro:klaro@postgres:5432/klaro?sslmode=disable
+      REDIS_ADDR: redis:6379
+      DEV_TOKEN: dev
+    ports: ["8080:8080"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+
+  worker:
+    build: { context: ., dockerfile: Dockerfile.worker }
+    environment:
+      DATABASE_URL: postgres://klaro:klaro@postgres:5432/klaro?sslmode=disable
+      REDIS_ADDR: redis:6379
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
