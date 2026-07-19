@@ -81,7 +81,14 @@ PENDING → VALIDATING → QUEUED → PROVISIONING → RUNNING → AGGREGATING �
 - **에러율 > 80%** 또는 대상 `503` 지속 → Control Plane에 `abort` 신호 → 전 워커 즉시 부하 중단.
 - 상태 `ABORTED` 기록 + 사용자 알림(이메일=개발 MailHog / Slack 스텁) + 부분 결과 보존.
 
-**시나리오 포맷**: k6 JS 또는 선언형 YAML(내부 변환). 필드: 대상 URL, VU, duration, ramp-up, HTTP 스텝, thresholds.
+**다중 API — 가중치 혼합 트래픽 ([LG-04])**
+- 한 사이트(`verified_domain`)에 등록된 여러 API(`endpoints` 카탈로그)를 **하나의 부하 테스트에서 동시** 실행.
+- 총 VU/RPS를 API별 `weight` 비율로 분배(예: 60/30/10) → 실제 운영 트래픽 믹스 재현.
+- k6 executor가 weight 기반 확률로 매 요청의 대상 API를 선택. 헤더·바디·쿼리는 endpoint 정의에서 주입.
+- 메트릭은 **API 단위로 태깅** 집계 → 결과·리포트에서 **API별 분해**(`load_test_results`에 API별 1행 + 전체 집계 1행). 병목 API를 개별 식별.
+- 대안 모드 `journey`: 로그인→조회→결제처럼 API를 **순차**로 밟는 사용자 시나리오 1회를 반복(선택형).
+
+**시나리오 포맷**: k6 JS 또는 선언형 JSON/YAML(내부 변환). 필드: 대상 사이트(domain), VU, duration, ramp-up, thresholds, **apis[]**(카탈로그 endpoint 참조 + weight).
 
 ### 2.3 Security Scanner (S2)
 

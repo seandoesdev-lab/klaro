@@ -51,6 +51,12 @@
 | Domain | POST `/projects/:id/domains` | 도메인 등록(토큰 발급) | member |
 | Domain | POST `/projects/:id/domains/:domainId/verify` | 소유권 검증 실행 | member |
 | Domain | DELETE `/projects/:id/domains/:domainId` | 도메인 제거 | member |
+| Endpoint | GET `/projects/:id/domains/:domainId/endpoints` | 사이트 API 카탈로그 목록 | member |
+| Endpoint | POST `/projects/:id/domains/:domainId/endpoints` | API 등록 | member |
+| Endpoint | POST `/projects/:id/domains/:domainId/endpoints/import` | OpenAPI/HAR 일괄 등록 | member |
+| Endpoint | GET `/endpoints/:id` | API 상세 | member |
+| Endpoint | PATCH `/endpoints/:id` | API 수정 | member |
+| Endpoint | DELETE `/endpoints/:id` | API 삭제 | member |
 | Load Test | GET `/projects/:id/load-tests` | 부하 테스트 목록 | member |
 | Load Test | POST `/projects/:id/load-tests` | 부하 테스트 생성/실행 | member |
 | Load Test | GET `/load-tests/:id` | 상세/상태 | member |
@@ -118,16 +124,18 @@
 
 **POST** `/projects/:id/load-tests`
 ```json
-// req
+// req — 사이트(domain) 하나에 등록된 여러 API를 가중치 혼합 트래픽으로 동시 실행
 {
-  "target_url": "https://staging.example.com",
+  "domain_id": "uuid-site",                    // 테스트 대상 사이트(검증된 도메인)
   "scenario": {
+    "mode": "weighted",                        // weighted(가중치 혼합) | journey(순차 여정)
     "vu": 1000,
     "duration_sec": 1800,
     "ramp_up_sec": 60,
-    "steps": [
-      { "method": "GET", "path": "/api/v1/health" },
-      { "method": "POST", "path": "/api/v1/login", "body": {} }
+    "apis": [                                   // 카탈로그(endpoints) 중 선택 + 트래픽 비중
+      { "endpoint_id": "uuid-products", "weight": 60 },
+      { "endpoint_id": "uuid-login",    "weight": 30 },
+      { "endpoint_id": "uuid-health",   "weight": 10 }
     ],
     "thresholds": { "http_req_duration_p95_ms": 2000, "error_rate": 0.05 }
   },
@@ -137,6 +145,8 @@
 { "id": "uuid", "status": "validating" }
 // res 403 (미검증 도메인)
 { "error": { "code": "DOMAIN_NOT_VERIFIED", "message": "target domain must be verified" } }
+// res 422 (endpoint가 domain 소속이 아님)
+{ "error": { "code": "VALIDATION_ERROR", "message": "all endpoints must belong to domain_id" } }
 // res 402 (쿼터 초과)
 { "error": { "code": "QUOTA_EXCEEDED", "message": "plan limit: 1000 VU", "details": { "requested": 2000, "overage_billing": true } } }
 ```
@@ -166,7 +176,12 @@
   "latency": { "p50": 320, "p95": 1850, "p99": 3100 },
   "error_rate": 0.02,
   "max_vu_before_degradation": 1250,
-  "bottleneck_endpoint": "/api/v1/payment"
+  "bottleneck_endpoint": "POST /api/v1/payment",
+  "per_api": [
+    { "endpoint_id": "uuid-products", "method": "GET",  "path": "/api/v1/products", "weight": 60, "rps_avg": 2520, "latency_p95_ms": 900,  "error_rate": 0.01 },
+    { "endpoint_id": "uuid-login",    "method": "POST", "path": "/api/v1/login",    "weight": 30, "rps_avg": 1260, "latency_p95_ms": 1850, "error_rate": 0.03 },
+    { "endpoint_id": "uuid-health",   "method": "GET",  "path": "/api/v1/health",   "weight": 10, "rps_avg": 420,  "latency_p95_ms": 120,  "error_rate": 0.00 }
+  ]
 }
 ```
 
@@ -220,6 +235,51 @@ Header: X-Report-Password: s3cret
   "breakdown": [ { "load_test_id": "uuid", "vu_minutes": 30000 } ]
 }
 ```
+
+### 3.6 API 카탈로그 (사이트별 여러 API)
+
+한 사이트(검증된 도메인)에 테스트할 API를 등록해두고, 부하 테스트·스캔이 재사용한다([CAT-01]).
+
+**POST** `/projects/:id/domains/:domainId/endpoints` — API 등록
+```json
+// req
+{
+  "name": "로그인",
+  "method": "POST",
+  "path": "/api/v1/login",
+  "headers": { "Content-Type": "application/json" },
+  "body_template": { "email": "{{email}}", "password": "{{password}}" },
+  "expected_status": 200,
+  "default_weight": 30,
+  "tags": ["write", "auth"]
+}
+// res 201
+{ "id": "uuid-login", "domain_id": "uuid-site", "method": "POST", "path": "/api/v1/login", "status": "active" }
+// res 409 (동일 사이트에 method+path 중복)
+{ "error": { "code": "CONFLICT", "message": "endpoint already exists for this domain" } }
+```
+
+**GET** `/projects/:id/domains/:domainId/endpoints` — 카탈로그 목록
+```json
+{
+  "data": [
+    { "id": "uuid-products", "name": "상품 목록", "method": "GET",  "path": "/api/v1/products", "default_weight": 60 },
+    { "id": "uuid-login",    "name": "로그인",    "method": "POST", "path": "/api/v1/login",    "default_weight": 30 },
+    { "id": "uuid-health",   "name": "헬스체크",  "method": "GET",  "path": "/api/v1/health",   "default_weight": 10 }
+  ],
+  "next_cursor": null
+}
+```
+
+**POST** `/projects/:id/domains/:domainId/endpoints/import` — 일괄 등록(OpenAPI 스펙 또는 브라우저 HAR)
+```json
+// req
+{ "source": "openapi", "spec_url": "https://staging.example.com/openapi.json" }
+// res 200
+{ "imported": 42, "skipped_duplicates": 3 }
+```
+
+**PATCH** `/endpoints/:id` — 수정 / **DELETE** `/endpoints/:id` — 삭제(진행 중 테스트가 참조하면 `409`).
 
 ---
 

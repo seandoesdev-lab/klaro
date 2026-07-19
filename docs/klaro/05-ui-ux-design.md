@@ -50,7 +50,7 @@ klaro
 │       ├─ 보안 스캔      ← SAST/DAST findings
 │       ├─ APM           ← 트레이스·병목·로그
 │       ├─ 리포트        ← 발행·공유
-│       └─ 설정          ← 도메인 검증, APM SDK, GitHub 연동
+│       └─ 설정          ← 사이트(도메인) 검증·API 카탈로그, APM SDK, GitHub 연동
 ├─ 사용량/과금
 └─ 조직 설정            ← 멤버·역할·API 키
 ```
@@ -85,15 +85,21 @@ UX 포인트
 
 ```
 ┌─ 새 부하 테스트 ─────────────────────────────────────┐
-│ 대상 URL   [ https://staging.example.com  ▼검증됨 ]  │
+│ 대상 사이트 [ staging.example.com  ▼검증됨 ]         │
+│                                                      │
+│ 테스트할 API (카탈로그에서 선택 · 트래픽 가중치)      │
+│  ☑ GET  /api/v1/products   [======●=] 60%           │
+│  ☑ POST /api/v1/login      [===●====] 30%           │
+│  ☑ GET  /api/v1/health     [●=══════] 10%           │
+│  ＋ API 추가 · 카탈로그 관리                          │
 │                                                      │
 │ ◉ 간단 모드                                          │
-│   동시 사용자 [====●======] 1,000 VU                 │
-│   지속 시간   [==●========] 5분                       │
+│   동시 사용자 [====●══════] 1,000 VU (가중치로 분배) │
+│   지속 시간   [══●════════] 5분                       │
 │   예상 사용량: 5,000 VU-Minutes (Pro 한도 내)        │
 │                                                      │
 │ ▸ 고급 모드 (펼치기)                                  │
-│    · 램프업 곡선 · HTTP 스텝 시나리오 · 임계치         │
+│    · 램프업 곡선 · API별 임계치 · 순차 여정(journey)   │
 │    · 시나리오 레코더로 가져오기(Chrome 확장)          │
 │                                                      │
 │ 🛡 안전장치: 대상 에러율 80% 초과 시 자동 중단        │
@@ -102,8 +108,11 @@ UX 포인트
 ```
 
 UX 포인트
+- **사이트 선택 → API 다중 선택**: 검증된 사이트를 고르면 등록된 API 카탈로그가 뜨고, 여러 API를 체크해 한 번에 테스트([CAT-01], [LG-04]).
+- **가중치 슬라이더**: API별 트래픽 비중(합계 100%)을 조절 → 총 VU를 비율로 분배. 실제 운영 트래픽 믹스를 재현.
+- 카탈로그가 비었으면 인라인으로 "API 추가"(메서드·경로) 유도, "카탈로그 관리"로 사이트 설정 이동.
 - **슬라이더 + 실시간 사용량/비용 미리보기**: 한도 초과 시 즉시 경고와 초과 과금 안내([BILL-02]).
-- 고급 옵션은 접힘 상태가 기본(점진적 노출).
+- 고급 옵션은 접힘 상태가 기본(점진적 노출). 순차 여정(journey) 모드는 고급에서 선택.
 - 서킷 브레이커를 **눈에 보이는 안전 약속**으로 배치 → 초보의 "내 서버 죽으면 어쩌지" 불안 해소.
 
 ### 4.3 실시간 테스트 대시보드 (핵심 화면)
@@ -258,6 +267,8 @@ UX 포인트
 
 ## 10. 개발 핸드오프 노트
 
+- 부하 테스트 생성은 **사이트(domain) + API 카탈로그 다중 선택 + 가중치**로 구성([API 스펙 §3.2·§3.6](./03-api-spec.md)): 요청 바디 `domain_id` + `scenario.apis[{endpoint_id, weight}]`. API 카탈로그 CRUD는 [`/projects/:id/domains/:domainId/endpoints`](./03-api-spec.md).
+- 결과·리포트는 **API별 분해**를 표시: `/load-tests/:id/results`의 `per_api[]`(API별 rps·p95·error_rate)와 `bottleneck_endpoint`로 병목 API 강조([데이터 모델 §2.3 load_test_results](./02-data-model.md)).
 - 실시간 대시보드는 **WebSocket 구독**([API 스펙 §3.2 `/load-tests/:id/stream`](./03-api-spec.md))에 바인딩 — 값 스키마: `rps·latency_p95_ms·error_rate·active_vu`.
 - 리포트 화면은 [`/reports/:id`](./03-api-spec.md) 응답의 `performance_score·security_score·ai_summary`에 매핑.
 - 보안 findings 필터/무시는 [`PATCH /scans/:id/findings/:id`](./03-api-spec.md)와 `finding_hash` 기준 상태 유지([데이터 모델 §2.4](./02-data-model.md)).

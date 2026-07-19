@@ -13,7 +13,7 @@
 ```
 organizations 1──∞ users(멤버십)        organizations 1──∞ projects
        │ 1                                        │ 1
-       ├──∞ subscriptions ──1 plans               ├──∞ verified_domains
+       ├──∞ subscriptions ──1 plans               ├──∞ verified_domains ──1∞ endpoints(API 카탈로그)
        ├──∞ usage_records                         ├──∞ load_tests ──1∞ load_test_results
        ├──∞ api_keys                              ├──∞ scans ──1∞ scan_findings
        └──∞ audit_logs                            ├──∞ reports ──0..1 report_shares
@@ -23,6 +23,8 @@ github_installations 1──∞ projects
 ```
 
 ---
+
+> **사이트 = `verified_domains`**. 각 사이트는 여러 API(`endpoints`)를 카탈로그로 보유하고, 부하 테스트는 이 중 일부를 **가중치와 함께 선택**해 하나의 시나리오로 동시 실행한다(load_tests ↔ endpoints N:M, `scenario.apis[]`).
 
 ## 2. 테이블 정의
 
@@ -84,7 +86,7 @@ github_installations 1──∞ projects
 | github_installation_id | uuid FK nullable |
 | created_at | timestamptz |
 
-**verified_domains** — DDoS 악용 차단 게이트([SC-01])
+**verified_domains** — 테스트 대상 **사이트**. DDoS 악용 차단 게이트([SC-01])
 | 컬럼 | 타입 | 비고 |
 |------|------|------|
 | id | uuid PK | |
@@ -96,6 +98,23 @@ github_installations 1──∞ projects
 | verified_at | timestamptz nullable | |
 | — | UNIQUE(project_id, domain) | |
 
+**endpoints** — 사이트(도메인)별 테스트 대상 **API 카탈로그** ([CAT-01]). 한 번 등록해 여러 부하 테스트·스캔에서 재사용
+| 컬럼 | 타입 | 비고 |
+|------|------|------|
+| id | uuid PK | |
+| domain_id | uuid FK→verified_domains | 소속 사이트(검증된 도메인) |
+| name | text | 사람이 읽는 이름(예: "로그인") |
+| method | enum(GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS) | HTTP 메서드 |
+| path | text | 예: `/api/v1/login` |
+| query | jsonb nullable | 쿼리 파라미터 템플릿 |
+| headers | jsonb nullable | 요청 헤더(토큰 등) |
+| body_template | jsonb nullable | 요청 바디 템플릿 |
+| expected_status | int nullable | 정상 응답 코드(검증용) |
+| default_weight | int nullable | 부하 테스트 기본 트래픽 비중 |
+| tags | text[] nullable | 분류(예: read/write, public) |
+| created_at / updated_at | timestamptz | |
+| — | UNIQUE(domain_id, method, path) | 사이트 내 API 중복 방지 |
+
 ### 2.3 부하 테스트 (S1)
 
 **load_tests**
@@ -103,9 +122,10 @@ github_installations 1──∞ projects
 |------|------|------|
 | id | uuid PK | |
 | project_id | uuid FK | |
-| target_url | text | verified_domains 소속이어야 함 |
-| scenario | jsonb | VU, duration, ramp-up, steps, thresholds |
-| vu | int | 최대 가상 사용자 |
+| domain_id | uuid FK→verified_domains | 테스트 대상 **사이트**(검증 필수) |
+| target_url | text | domain 기준 베이스 URL(스킴+호스트). endpoints의 path와 결합 |
+| scenario | jsonb | mode(weighted/journey), vu, duration, ramp-up, thresholds, **apis:[{endpoint_id, weight}]**(가중치 혼합 트래픽) |
+| vu | int | 최대 가상 사용자(가중치로 API별 분배) |
 | duration_sec | int | |
 | status | enum(pending, validating, queued, provisioning, running, aggregating, completed, failed, aborted, rejected) | |
 | region | text nullable | M3 멀티리전 |
@@ -113,11 +133,12 @@ github_installations 1──∞ projects
 | started_at / finished_at | timestamptz | |
 | created_by | uuid FK→users | |
 
-**load_test_results** — 요약 결과(시계열 원본은 TSDB)
+**load_test_results** — 요약 결과(시계열 원본은 TSDB). **API별 1행 + 테스트 전체 집계 1행**으로 저장
 | 컬럼 | 타입 | 비고 |
 |------|------|------|
 | id | uuid PK | |
 | load_test_id | uuid FK | |
+| endpoint_id | uuid FK→endpoints nullable | API별 결과 행. **NULL = 테스트 전체 집계** |
 | rps_avg | numeric | throughput |
 | latency_p50 / p95 / p99 | numeric(ms) | |
 | error_rate | numeric | |
@@ -257,6 +278,9 @@ github_installations 1──∞ projects
 ## 4. 주요 인덱스(초안)
 
 - `load_tests(project_id, status, created_at)` — 대시보드 목록.
+- `endpoints(domain_id)` — 사이트별 API 카탈로그 목록.
+- `endpoints(domain_id, method, path)` UNIQUE — 사이트 내 API 중복 방지.
+- `load_test_results(load_test_id, endpoint_id)` — API별 결과 조회.
 - `scan_findings(scan_id, status)`, `scan_findings(finding_hash)` — 오탐 매칭.
 - `usage_records(org_id, created_at)` — 월별 집계.
 - `verified_domains(project_id, domain)` UNIQUE — 소유권 게이트 조회.
