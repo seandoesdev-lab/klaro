@@ -65,9 +65,11 @@ func NewAggregator() *Aggregator {
 	return &Aggregator{stepDuration: map[string]float64{}, stepCount: map[string]int{}}
 }
 
-// isError treats missing tags and 4xx/5xx statuses as failed requests.
+// isError treats anything that is not an HTTP 2xx/3xx response as a failed
+// request. k6 reports status "0" for requests that never received a response
+// (DNS failure, connection refused, timeout), which must count as errors.
 func isError(status string) bool {
-	return status == "" || strings.HasPrefix(status, "5") || strings.HasPrefix(status, "4")
+	return !(strings.HasPrefix(status, "2") || strings.HasPrefix(status, "3"))
 }
 
 func (a *Aggregator) Add(p metricPoint) {
