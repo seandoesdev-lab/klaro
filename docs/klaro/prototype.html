@@ -992,6 +992,7 @@
     view: "home", siteId: null, tab: "overview",
     home: { q: "", st: "all", sort: "score" },
     load: { mode: "list", runId: null, cmpA: null, cmpB: null },
+    apiSel: null, apiSelSite: null,
     epSort: { key: 4, dir: -1 },
     sec: { eng: "all", sev: "all" },
     apm: { traceId: null, lvl: "all", q: "" },
@@ -1405,14 +1406,17 @@
     var h = crumbLoad(s, "새 테스트");
     h += '<div class="page-head"><h1 style="font-size:17px">새 부하 테스트</h1><span class="page-sub">검증된 도메인만 테스트할 수 있어요</span></div>';
     h += '<div style="display:flex;flex-direction:column;gap:14px;max-width:760px">';
-    h += '<div class="card"><h2>대상</h2><div class="url-row" style="margin-top:8px"><span>https://' + esc(s.url) + '</span><span class="badge badge-good">✓ 소유권 검증됨 · DNS TXT</span></div></div>';
-    h += '<div class="card"><h2>간단 모드</h2><p class="card-sub">추천값이 미리 채워져 있어요. 그대로 시작해도 됩니다.</p>' +
+    h += '<div class="card"><h2>대상 사이트</h2><div class="url-row" style="margin-top:8px"><span>https://' + esc(s.url) + '</span><span class="badge badge-good">✓ 소유권 검증됨 · DNS TXT</span></div></div>';
+    h += '<div class="card"><h2>테스트할 API</h2><p class="card-sub">이 사이트에 등록된 API 카탈로그에서 여러 개를 선택하고, 트래픽 비중(가중치)을 조절하세요. 총 VU가 비율대로 분배됩니다.</p><div id="apiList"></div>' +
+      '<p style="margin:10px 0 0"><button class="link" type="button" data-action="copy">＋ API 추가 · 카탈로그 관리</button></p>' +
+      '<div class="usage-preview" id="weightSum" aria-live="polite" style="margin-top:12px"></div></div>';
+    h += '<div class="card"><h2>간단 모드</h2><p class="card-sub">추천값이 미리 채워져 있어요. 총 VU는 위에서 선택한 API 가중치대로 나뉩니다.</p>' +
       '<div class="slider-row"><label for="vuSlider">동시 사용자</label><input type="range" id="vuSlider" min="10" max="2000" step="10" value="100" aria-describedby="usagePrev"><output class="slider-out num" id="vuOut" for="vuSlider">100 VU</output></div>' +
       '<div class="slider-row"><label for="durSlider">지속 시간</label><input type="range" id="durSlider" min="1" max="30" step="1" value="5" aria-describedby="usagePrev"><output class="slider-out num" id="durOut" for="durSlider">5분</output></div>' +
       '<div class="usage-preview" aria-live="polite" id="usagePrev"><span><span class="microlabel">예상 사용량</span><br><span class="usage-num" id="usageNum">500</span> <span style="color:var(--muted);font-size:12px">VU-Minutes</span></span>' +
       '<span class="badge badge-good" id="usageBadge">● 남은 한도 내</span></div></div>';
-    h += '<details class="advanced"><summary>고급 모드 — 시나리오 편집기</summary><div class="adv-body">' +
-      '<h2 style="font-size:13px;margin:12px 0 2px">HTTP 스텝 시나리오</h2><p class="card-sub">위에서 아래 순서로 각 VU가 반복 실행합니다.</p><div id="stepList"></div>' +
+    h += '<details class="advanced"><summary>고급 모드 — 순차 여정 & 임계치</summary><div class="adv-body">' +
+      '<h2 style="font-size:13px;margin:12px 0 2px">순차 여정(journey) — 선택</h2><p class="card-sub">가중치 혼합 대신 로그인→조회→결제처럼 <strong>순서대로</strong> 밟는 시나리오로 실행할 때만 사용합니다.</p><div id="stepList"></div>' +
       '<p style="margin:10px 0 0"><button class="btn btn-sm" type="button" data-action="add-step">＋ 스텝 추가</button>' +
       ' <button class="link" type="button" data-action="copy" style="margin-left:8px">Chrome 확장 레코더에서 가져오기</button></p>' +
       '<h2 style="font-size:13px;margin:18px 0 2px">램프업 곡선</h2><div class="radio-row" role="radiogroup" aria-label="램프업 곡선">' +
@@ -1426,8 +1430,54 @@
     h += '<div style="display:flex;justify-content:flex-end;gap:10px"><button class="btn" type="button" data-action="tab" data-tab="load">취소</button>' +
       '<button class="btn btn-primary" type="button" data-action="start-test">▶ 테스트 시작</button></div></div>';
     $("siteBody").innerHTML = h;
+    renderApiList(s);
+    updateWeightSum();
     renderSteps();
     updateUsagePreview();
+  }
+
+  function ensureApiSel(s) {
+    if (state.apiSel && state.apiSelSite === s.id) return;
+    var defW = [60, 30, 10];
+    state.apiSel = s.endpoints.map(function (e, i) {
+      return { on: i < 3, w: i < 3 ? defW[i] : 20 };
+    });
+    state.apiSelSite = s.id;
+  }
+
+  function renderApiList(s) {
+    var el = $("apiList");
+    if (!el) return;
+    ensureApiSel(s);
+    var h = "";
+    s.endpoints.forEach(function (e, i) {
+      var a = state.apiSel[i];
+      h += '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 0;border-bottom:1px solid var(--border)' + (a.on ? '' : ';opacity:.5') + '">' +
+        '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;min-width:0">' +
+        '<input type="checkbox" data-api="' + i + '"' + (a.on ? ' checked' : '') + ' aria-label="' + esc(e[1]) + ' 포함">' +
+        '<span class="engine-tag">' + e[0] + '</span> <span class="num" style="font-size:12px;overflow:hidden;text-overflow:ellipsis">' + esc(e[1]) + '</span></label>' +
+        '<span style="display:flex;align-items:center;gap:8px;flex:none">' +
+        (a.on
+          ? '<input type="range" min="5" max="90" step="5" value="' + a.w + '" data-wi="' + i + '" aria-label="' + esc(e[1]) + ' 트래픽 가중치" style="width:120px"><output id="wOut' + i + '" class="num" style="width:38px;text-align:right">' + a.w + '%</output>'
+          : '<span class="microlabel">미포함</span>') +
+        '</span></div>';
+    });
+    el.innerHTML = h;
+  }
+
+  function updateWeightSum() {
+    var el = $("weightSum");
+    if (!el || !state.apiSel) return;
+    var on = state.apiSel.filter(function (a) { return a.on; });
+    if (!on.length) {
+      el.innerHTML = '<span class="badge badge-warn">⚠ 최소 1개 API를 선택하세요</span>';
+      return;
+    }
+    var sum = on.reduce(function (t, a) { return t + a.w; }, 0);
+    el.innerHTML = '<span><span class="microlabel">선택한 API</span><br><span class="usage-num">' + on.length +
+      '</span> <span style="color:var(--muted);font-size:12px">개 · 총 VU를 가중치 비율로 분배</span></span>' +
+      '<span class="badge ' + (sum === 100 ? 'badge-good' : 'badge-warn') + '">' +
+      (sum === 100 ? '● 가중치 합 100%' : '⚠ 가중치 합 ' + sum + '% (100% 권장)') + '</span>';
   }
 
   function renderSteps() {
@@ -1943,6 +1993,7 @@
     if (el.id === "homeSearch") { state.home.q = el.value; renderHome(); }
     else if (el.id === "logSearch") { state.apm.q = el.value; state.apm.qFocus = true; render(); }
     else if (el.id === "vuSlider" || el.id === "durSlider") updateUsagePreview();
+    else if (el.dataset && el.dataset.wi !== undefined && el.dataset.wi !== "") { state.apiSel[+el.dataset.wi].w = +el.value; var wo = $("wOut" + el.dataset.wi); if (wo) wo.textContent = el.value + "%"; updateWeightSum(); }
     else if (el.dataset && el.dataset.sf) { state.steps[+el.dataset.si][el.dataset.sf] = el.value; }
   });
   document.addEventListener("change", function (ev) {
@@ -1950,6 +2001,7 @@
     if (el.id === "homeStatus") { state.home.st = el.value; renderHome(); }
     else if (el.id === "homeSort") { state.home.sort = el.value; renderHome(); }
     else if (el.id === "prScan") toast(el.checked ? "PR 자동 스캔이 켜졌습니다." : "PR 자동 스캔이 꺼졌습니다.");
+    else if (el.dataset && el.dataset.api !== undefined && el.dataset.api !== "") { var st = site(state.siteId); state.apiSel[+el.dataset.api].on = el.checked; renderApiList(st); updateWeightSum(); }
   });
 
   $("themeToggle").addEventListener("click", function () {
