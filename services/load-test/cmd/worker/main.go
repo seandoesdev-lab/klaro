@@ -5,9 +5,11 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"github.com/klaro/load-test/internal/queue"
+	"github.com/klaro/load-test/internal/scanner"
 	"github.com/klaro/load-test/internal/store"
 	"github.com/klaro/load-test/internal/worker"
 )
@@ -15,6 +17,15 @@ import (
 func env(k, def string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
+	}
+	return def
+}
+
+func envInt(k string, def int) int {
+	if v := os.Getenv(k); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
 	}
 	return def
 }
@@ -44,11 +55,39 @@ func main() {
 	}
 	rd := queue.NewRedis(env("REDIS_ADDR", "localhost:6379"))
 	log.Println("worker started")
+
+	// [EPHEM-01] startup guard: the scan work dir must be tmpfs (RAM). Bypass with
+	// SCAN_WORK_TMPFS_ASSERT=0 for local `go run`/tests on a non-tmpfs path.
+	workDir := env("SCAN_WORK_DIR", "/scan-work")
+	if env("SCAN_WORK_TMPFS_ASSERT", "1") != "0" {
+		if err := scanner.AssertTmpfs(workDir); err != nil {
+			log.Fatalf("scan work dir is not tmpfs (set SCAN_WORK_TMPFS_ASSERT=0 to bypass in dev): %v", err)
+		}
+	}
+
 	// Security-scan worker runs alongside the load-test worker on its own queue.
-	go worker.RunScan(ctx, worker.ScanDeps{
+	scanDeps := &worker.ScanDeps{
 		Queue: rd,
 		Store: st,
-	})
+		Semgrep: scanner.Semgrep{
+			Bin:      env("SEMGREP_BIN", "semgrep"),
+			RulesDir: env("SEMGREP_RULES_DIR", "/opt/semgrep-rules"),
+		},
+		OSV: scanner.OSV{
+			Bin:         env("OSV_BIN", "osv-scanner"),
+			Offline:     env("OSV_OFFLINE", "1") != "0", // [COST-05]/M-1: no runtime network by default
+			LocalDBPath: env("OSV_LOCAL_DB_PATH", "/opt/osv-db"),
+		},
+		ZAP:            scanner.ZAP{Addr: env("ZAP_ADDR", "")},
+		WorkDir:        workDir,
+		SrcDir:         env("SCAN_SRC_DIR", "/scan-src"),
+		MaxConcurrency: envInt("SCAN_MAX_CONCURRENCY", 2),
+	}
+	// ZAP is optional: when ZAP_ADDR is unset, DAST stays header-only (no daemon).
+	if env("ZAP_ADDR", "") == "" {
+		scanDeps.ZAP = nil
+	}
+	go worker.RunScan(ctx, scanDeps)
 	worker.Run(ctx, worker.Deps{
 		Queue:  rd,
 		Signal: rd,

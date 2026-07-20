@@ -20,6 +20,7 @@ type Deps struct {
 	Store     *store.Store
 	Queue     queue.JobQueue
 	ScanQueue queue.ScanQueue
+	SrcTokens queue.SrcTokenStore // [M-2] SAST upload token → org binding (nil = permissive dev/test)
 	Signal    queue.Signaler
 	Verifier  *domainverify.Verifier
 	JWT       *auth.JWTManager
@@ -91,6 +92,7 @@ func NewRouter(d Deps) *gin.Engine {
 		g.GET("/load-tests/:id", d.authorize(V), d.getLoadTest)
 		g.POST("/load-tests/:id/abort", d.authorize(M), d.abortLoadTest)
 		g.GET("/load-tests/:id/results", d.authorize(V), d.getResults)
+		g.POST("/projects/:id/scans/source", d.authorize(M), d.uploadScanSource)
 		g.POST("/projects/:id/scans", d.authorize(M), d.createScan)
 		g.GET("/projects/:id/scans", d.authorize(V), d.listScans)
 		g.GET("/scans/:id", d.authorize(V), d.getScan)

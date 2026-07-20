@@ -8,9 +8,9 @@ services:
     ports: ["5432:5432"]
     volumes:
       # 명명 볼륨: 익명 볼륨과 달리 `docker compose down -v` 로 명시적 초기화 가능.
-      # 주의: 마이그레이션(0001~0008)을 변경하면 initdb 재실행을 위해 `down -v` 필요.
+      # 주의: 마이그레이션(0001~0009)을 변경하면 initdb 재실행을 위해 `down -v` 필요.
       - klaro_pgdata:/var/lib/postgresql/data
-      # 전체 마이그레이션을 사전순(0001..0008)으로 initdb 에 적용.
+      # 전체 마이그레이션을 사전순(0001..0009)으로 initdb 에 적용.
       - ./migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U klaro"]
@@ -21,6 +21,18 @@ services:
   redis:
     image: redis:7
     ports: ["6379:6379"]
+
+  # OWASP ZAP headless daemon (DAST engine, design #3). Local OSS, ₩0 ([COST-05]).
+  zap:
+    image: zaproxy/zap-stable:latest
+    command: >
+      zap.sh -daemon -host 0.0.0.0 -port 8090
+      -config api.disablekey=true
+      -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true
+    deploy:
+      resources:
+        limits:
+          memory: 2g
 
   api:
     build: { context: ., dockerfile: Dockerfile.api }
@@ -33,11 +45,14 @@ services:
       DEV_TOKEN: dev
       JWT_SECRET: dev-insecure-jwt-secret
       OAUTH_REDIRECT_BASE: http://localhost:8080
+      SCAN_SRC_DIR: /scan-src
       # OAuth provider 크리덴셜 미설정 → dev mock 콜백(D-3). 실사용 시 아래 주입.
       # GITHUB_CLIENT_ID: ""
       # GITHUB_CLIENT_SECRET: ""
       # GOOGLE_CLIENT_ID: ""
       # GOOGLE_CLIENT_SECRET: ""
+    volumes:
+      - scan_src:/scan-src          # SAST 업로드 staging (api↔worker 공유 tmpfs, RAM)
     ports: ["8080:8080"]
     depends_on:
       postgres: { condition: service_healthy }
@@ -49,11 +64,32 @@ services:
       DATABASE_URL: postgres://klaro_app:klaro_app@postgres:5432/klaro?sslmode=disable
       SYSTEM_DATABASE_URL: postgres://klaro_system:klaro_system@postgres:5432/klaro?sslmode=disable
       REDIS_ADDR: redis:6379
+      SCAN_WORK_DIR: /scan-work
+      SCAN_SRC_DIR: /scan-src
+      ZAP_ADDR: http://zap:8090
+      SCAN_MAX_CONCURRENCY: "2"
+    tmpfs:
+      - /scan-work:size=2g,mode=1777   # ★ [EPHEM-01] 잡별 소스 작업공간(RAM 전용)
+    volumes:
+      - scan_src:/scan-src
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_started }
+      zap: { condition: service_started }
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4g
 
 volumes:
   klaro_pgdata:
+  # RAM 백엔드 공유 볼륨(api↔worker): 업로드 소스 아카이브가 디스크에 닿지 않도록 tmpfs.
+  scan_src:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=1g"

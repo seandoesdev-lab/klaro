@@ -5,8 +5,39 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -o /out/worker ./cmd/worker
 
-FROM grafana/k6:latest
-USER root
-COPY --from=build /out/worker /usr/local/bin/worker
-ENV K6_PATH=k6
+# k6 binary source (S1 load worker must keep working after the base image change).
+FROM grafana/k6:latest AS k6
+
+# Runtime base: python-slim so Semgrep (pip) is available. Scanners are bundled at
+# build time → runtime is offline and $0 ([COST-05]).
+FROM python:3.12-slim
+ARG OSV_VERSION=v1.9.1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ca-certificates curl \
+ && pip install --no-cache-dir "semgrep==1.*" \
+ && curl -sSL -o /usr/local/bin/osv-scanner \
+      "https://github.com/google/osv-scanner/releases/download/${OSV_VERSION}/osv-scanner_linux_amd64" \
+ && chmod +x /usr/local/bin/osv-scanner \
+ && git clone --depth 1 https://github.com/semgrep/semgrep-rules /opt/semgrep-rules \
+ && apt-get purge -y --auto-remove \
+ && rm -rf /var/lib/apt/lists/*
+# [M-1] Populate the OSV offline advisory DB at build time so the runtime scan
+# needs no network. osv-scanner downloads the ecosystem zips into OSV_SCANNER_LOCAL_DB.
+# Best-effort: build proceeds even if a transient download hiccup occurs; if the DB
+# is absent at runtime, OSV.Scan surfaces the error instead of a false clean result.
+ENV OSV_SCANNER_LOCAL_DB=/opt/osv-db
+RUN mkdir -p /opt/osv-db /tmp/osv-seed \
+ && printf '{\n  "name": "seed",\n  "dependencies": {}\n}\n' > /tmp/osv-seed/package.json \
+ && (osv-scanner --offline --download-offline-databases --recursive /tmp/osv-seed || \
+     osv-scanner --experimental-offline --experimental-download-offline-databases --recursive /tmp/osv-seed || \
+     echo "WARN: osv offline DB download skipped; set OSV_OFFLINE=0 or re-provision /opt/osv-db") \
+ && rm -rf /tmp/osv-seed
+COPY --from=k6    /usr/bin/k6   /usr/local/bin/k6
+COPY --from=build /out/worker   /usr/local/bin/worker
+ENV K6_PATH=k6 \
+    SEMGREP_RULES_DIR=/opt/semgrep-rules \
+    OSV_BIN=osv-scanner \
+    OSV_OFFLINE=1 \
+    OSV_LOCAL_DB_PATH=/opt/osv-db \
+    SEMGREP_BIN=semgrep
 ENTRYPOINT ["worker"]

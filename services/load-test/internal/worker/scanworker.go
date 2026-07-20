@@ -4,34 +4,55 @@ import (
 	"context"
 	"log"
 	"net/http"
-	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/klaro/load-test/internal/model"
 	"github.com/klaro/load-test/internal/queue"
+	"github.com/klaro/load-test/internal/scanner"
 	"github.com/klaro/load-test/internal/store"
 )
 
-// ScanDeps are the collaborators the scan worker needs.
+// ScanDeps are the collaborators the scan worker needs. Semgrep/OSV/ZAP are the
+// real engines; WorkDir/SrcDir are the tmpfs roots for [EPHEM-01].
 type ScanDeps struct {
 	Queue queue.ScanQueue
 	Store *store.Store
-	// HTTPClient is used for DAST fetches; defaults to a 10s-timeout client.
+
+	// HTTPClient is used for the DAST header fetch; defaults to a 10s client.
 	HTTPClient *http.Client
+
+	// Real engines. Injected by cmd/worker; nil-safe defaults are constructed for
+	// header-only DAST so unit paths keep working.
+	Semgrep scanner.SASTScanner
+	OSV     scanner.SASTScanner
+	ZAP     scanner.DASTScanner
+
+	WorkDir        string // tmpfs, e.g. /scan-work
+	SrcDir         string // shared tmpfs staging, e.g. /scan-src
+	MaxConcurrency int    // SCAN_MAX_CONCURRENCY (>=1)
+
+	// zapMu serializes access to the single ZAP daemon (design #4).
+	zapMu sync.Mutex
 }
 
-func (d ScanDeps) client() *http.Client {
+func (d *ScanDeps) client() *http.Client {
 	if d.HTTPClient != nil {
 		return d.HTTPClient
 	}
 	return &http.Client{Timeout: 10 * time.Second}
 }
 
-// RunScan consumes scan jobs until ctx is cancelled. Intended to run as its own
-// goroutine alongside the load-test worker loop.
-func RunScan(ctx context.Context, d ScanDeps) {
+// RunScan consumes scan jobs until ctx is cancelled, dispatching each to a bounded
+// worker pool (design #4 semaphore). Intended to run as its own goroutine.
+func RunScan(ctx context.Context, d *ScanDeps) {
+	max := d.MaxConcurrency
+	if max < 1 {
+		max = 1
+	}
+	sem := make(chan struct{}, max)
 	for {
 		select {
 		case <-ctx.Done():
@@ -42,44 +63,64 @@ func RunScan(ctx context.Context, d ScanDeps) {
 		if err != nil {
 			continue // timeout or transient; loop again
 		}
-		if err := d.processScan(ctx, job); err != nil {
-			log.Printf("scan %s failed: %v", job.ScanID, err)
-		}
+		sem <- struct{}{}
+		go func(job model.ScanJob) {
+			defer func() { <-sem }()
+			if err := d.processScan(ctx, job); err != nil {
+				log.Printf("scan %s failed: %v", job.ScanID, err)
+			}
+		}(job)
 	}
 }
 
-func (d ScanDeps) processScan(ctx context.Context, job model.ScanJob) error {
+func (d *ScanDeps) processScan(ctx context.Context, job model.ScanJob) (err error) {
 	id := job.ScanID
-	// org 스코프 실행 헬퍼(설계 §6.4): 각 DB write 를 RLS 관통 org tx 로 감싼다.
+	// org 스코프 실행 헬퍼(Phase 1 패턴): 각 DB write 를 RLS 관통 org tx 로 감싼다.
 	setStatus := func(to model.ScanStatus, score *int) error {
 		return d.Store.RunInOrg(ctx, job.OrgID, func(tx pgx.Tx) error {
 			return d.Store.UpdateScanStatus(ctx, tx, id, to, score)
 		})
 	}
-	if err := setStatus(model.ScanStatusRunning, nil); err != nil {
-		return err
+	// panic 안전망: 소스 cleanup 은 각 case 에서 defer 로 이미 등록되므로 panic 시에도 실행됨.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("scan %s panicked: %v", id, r)
+			_ = setStatus(model.ScanStatusFailed, nil)
+			err = nil
+		}
+	}()
+
+	if e := setStatus(model.ScanStatusRunning, nil); e != nil {
+		return e
 	}
 
 	var findings []model.ScanFinding
 	switch job.Type {
-	case model.ScanTypeDAST:
-		fs, err := d.runDAST(ctx, job.TargetURL)
-		if err != nil {
-			_ = setStatus(model.ScanStatusFailed, nil)
-			return err
-		}
-		findings = fs
 	case model.ScanTypeSAST:
-		findings = stubSAST(job.TargetURL)
+		findings, err = d.runSAST(ctx, job)
+	case model.ScanTypeDAST:
+		findings, err = d.runDAST(ctx, job)
 	default:
 		_ = setStatus(model.ScanStatusFailed, nil)
 		return nil
+	}
+	if err != nil {
+		_ = setStatus(model.ScanStatusFailed, nil)
+		return err
 	}
 
 	for i := range findings {
 		findings[i].ScanID = id
 	}
-	if err := d.Store.RunInOrg(ctx, job.OrgID, func(tx pgx.Tx) error {
+
+	// #7/#8 재스캔 triage: 이전 completed 스캔 대비 ignored 승계 + fixed 판정.
+	findings, err = d.applyTriage(ctx, job, findings)
+	if err != nil {
+		_ = setStatus(model.ScanStatusFailed, nil)
+		return err
+	}
+
+	if err = d.Store.RunInOrg(ctx, job.OrgID, func(tx pgx.Tx) error {
 		return d.Store.SaveFindings(ctx, tx, findings)
 	}); err != nil {
 		_ = setStatus(model.ScanStatusFailed, nil)
@@ -89,9 +130,94 @@ func (d ScanDeps) processScan(ctx context.Context, job model.ScanJob) error {
 	return setStatus(model.ScanStatusCompleted, &score)
 }
 
-// runDAST fetches the target and analyzes response headers. The pure analysis
-// lives in AnalyzeHeaders so it can be tested without the network.
-func (d ScanDeps) runDAST(ctx context.Context, targetURL string) ([]model.ScanFinding, error) {
+// runSAST acquires the Ephemeral source tree and runs Semgrep + osv in parallel,
+// each under its own timeout. cleanup() is deferred immediately after Acquire so
+// the source is destroyed on every exit path ([EPHEM-01]).
+func (d *ScanDeps) runSAST(ctx context.Context, job model.ScanJob) ([]model.ScanFinding, error) {
+	src := scanner.Source{
+		Type:    job.Source.Type,
+		RepoURL: job.Source.RepoURL,
+		Ref:     job.Source.Ref,
+		Token:   job.Source.Token,
+	}
+	acqCtx, cancelAcq := context.WithTimeout(ctx, scanner.CloneTimeoutSec*time.Second)
+	dir, cleanup, err := scanner.Acquire(acqCtx, d.WorkDir, d.SrcDir, src)
+	cancelAcq()
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup() // ★ [EPHEM-01] 소스 소멸 보장 (성공/에러/타임아웃/panic)
+
+	type res struct {
+		fs  []model.ScanFinding
+		err error
+	}
+	sgCh := make(chan res, 1)
+	ovCh := make(chan res, 1)
+
+	go func() {
+		if d.Semgrep == nil {
+			sgCh <- res{}
+			return
+		}
+		c, cancel := context.WithTimeout(ctx, scanner.SemgrepTimeoutSec*time.Second)
+		defer cancel()
+		fs, e := d.Semgrep.Scan(c, dir)
+		sgCh <- res{fs, e}
+	}()
+	go func() {
+		if d.OSV == nil {
+			ovCh <- res{}
+			return
+		}
+		c, cancel := context.WithTimeout(ctx, scanner.OSVTimeoutSec*time.Second)
+		defer cancel()
+		fs, e := d.OSV.Scan(c, dir)
+		ovCh <- res{fs, e}
+	}()
+
+	sg := <-sgCh
+	ov := <-ovCh
+	if sg.err != nil {
+		return nil, sg.err
+	}
+	if ov.err != nil {
+		return nil, ov.err
+	}
+	return append(sg.fs, ov.fs...), nil
+}
+
+// runDAST runs the offline header analysis plus (if a ZAP engine is configured)
+// an OWASP ZAP baseline/active scan, deduping overlapping topics (design #10).
+// ZAP is serialized via zapMu since a single daemon is shared.
+func (d *ScanDeps) runDAST(ctx context.Context, job model.ScanJob) ([]model.ScanFinding, error) {
+	header, err := d.analyzeHeaders(ctx, job.TargetURL)
+	if err != nil {
+		return nil, err
+	}
+	if d.ZAP == nil {
+		return header, nil // header-only DAST (no ZAP configured)
+	}
+	mode := scanner.ParseMode(job.Mode)
+	timeout := scanner.ZAPBaselineTimeoutSec
+	if mode == scanner.ModeActive {
+		timeout = scanner.ZAPActiveTimeoutSec
+	}
+	zctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+	defer cancel()
+
+	d.zapMu.Lock()
+	zap, zerr := d.ZAP.Scan(zctx, job.TargetURL, mode)
+	d.zapMu.Unlock()
+	if zerr != nil {
+		return nil, zerr
+	}
+	return scanner.DedupDAST(header, zap), nil
+}
+
+// analyzeHeaders performs the single network fetch and delegates to the pure
+// scanner.AnalyzeHeaders. Kept as a method so DAST stays testable without network.
+func (d *ScanDeps) analyzeHeaders(ctx context.Context, targetURL string) ([]model.ScanFinding, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
 		return nil, err
@@ -101,141 +227,52 @@ func (d ScanDeps) runDAST(ctx context.Context, targetURL string) ([]model.ScanFi
 		return nil, err
 	}
 	defer resp.Body.Close()
-	return AnalyzeHeaders(resp.Header, targetURL), nil
+	return scanner.AnalyzeHeaders(resp.Header, targetURL), nil
 }
 
-// minStrongHSTSMaxAge is the max-age (seconds, ~180d) below which an HSTS header
-// is considered weak.
-const minStrongHSTSMaxAge = 15552000
-
-// AnalyzeHeaders inspects HTTP response headers and returns security findings.
-// It is a pure function: given the same headers and location it always yields
-// the same findings (including stable finding hashes).
-func AnalyzeHeaders(h http.Header, location string) []model.ScanFinding {
-	var out []model.ScanFinding
-	add := func(ruleID string, sev model.Severity, title string) {
-		out = append(out, model.ScanFinding{
-			RuleID:      ruleID,
-			Severity:    sev,
-			Title:       title,
-			FindingHash: model.FindingHash(ruleID, location),
-			Status:      model.FindingOpen,
-		})
+// applyTriage carries forward triage state across re-scans (#8):
+//   - a current finding whose hash was previously `ignored` inherits that status/reason
+//   - a previous-scan finding whose hash is absent this time is appended as `fixed`
+//
+// The lookup runs in an org tx so RLS scopes it to the tenant.
+func (d *ScanDeps) applyTriage(ctx context.Context, job model.ScanJob, current []model.ScanFinding) ([]model.ScanFinding, error) {
+	var prev []model.ScanFinding
+	err := d.Store.RunInOrg(ctx, job.OrgID, func(tx pgx.Tx) error {
+		var e error
+		prev, e = d.Store.GetLatestCompletedScanFindings(ctx, tx, job.ProjectID, job.Type, job.ScanID)
+		return e
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(prev) == 0 {
+		return current, nil
 	}
 
-	// Strict-Transport-Security: missing or weak max-age -> high.
-	hsts := h.Get("Strict-Transport-Security")
-	if hsts == "" {
-		add("dast.missing-hsts", model.SeverityHigh,
-			"Missing Strict-Transport-Security header")
-	} else if maxAge := hstsMaxAge(hsts); maxAge < minStrongHSTSMaxAge {
-		add("dast.weak-hsts", model.SeverityHigh,
-			"Weak Strict-Transport-Security max-age (below 180 days)")
+	prevByHash := make(map[string]model.ScanFinding, len(prev))
+	for _, p := range prev {
+		prevByHash[p.FindingHash] = p
 	}
-
-	// Content-Security-Policy: missing -> medium.
-	if h.Get("Content-Security-Policy") == "" {
-		add("dast.missing-csp", model.SeverityMedium,
-			"Missing Content-Security-Policy header")
-	}
-
-	// X-Frame-Options: missing -> low (clickjacking).
-	if h.Get("X-Frame-Options") == "" {
-		add("dast.missing-x-frame-options", model.SeverityLow,
-			"Missing X-Frame-Options header (clickjacking risk)")
-	}
-
-	// X-Content-Type-Options: missing -> low (MIME sniffing).
-	if h.Get("X-Content-Type-Options") == "" {
-		add("dast.missing-x-content-type-options", model.SeverityLow,
-			"Missing X-Content-Type-Options header (MIME sniffing risk)")
-	}
-
-	// Server header version disclosure: version -> low, bare software -> info.
-	if server := h.Get("Server"); server != "" {
-		if hasVersion(server) {
-			add("dast.server-version-disclosure", model.SeverityLow,
-				"Server header discloses software version: "+server)
-		} else {
-			add("dast.server-software-disclosure", model.SeverityInfo,
-				"Server header discloses software: "+server)
+	curHashes := make(map[string]bool, len(current))
+	for i := range current {
+		curHashes[current[i].FindingHash] = true
+		if p, ok := prevByHash[current[i].FindingHash]; ok && p.Status == model.FindingIgnored {
+			current[i].Status = model.FindingIgnored
+			current[i].IgnoreReason = p.IgnoreReason
 		}
 	}
-
-	// X-XSS-Protection: missing -> info (legacy hardening).
-	if h.Get("X-XSS-Protection") == "" {
-		add("dast.missing-x-xss-protection", model.SeverityInfo,
-			"Missing X-XSS-Protection header")
-	}
-
-	return out
-}
-
-// hstsMaxAge extracts the max-age directive (seconds) from an HSTS header value,
-// returning 0 if absent or unparseable.
-func hstsMaxAge(v string) int {
-	for _, part := range strings.Split(v, ";") {
-		part = strings.TrimSpace(strings.ToLower(part))
-		if !strings.HasPrefix(part, "max-age") {
-			continue
+	// previous findings absent this run → fixed rows on the current scan.
+	for _, p := range prev {
+		if p.Status == model.FindingFixed {
+			continue // already resolved; don't re-carry
 		}
-		eq := strings.IndexByte(part, '=')
-		if eq < 0 {
-			return 0
-		}
-		n := 0
-		for _, ch := range strings.TrimSpace(part[eq+1:]) {
-			if ch < '0' || ch > '9' {
-				break
-			}
-			n = n*10 + int(ch-'0')
-		}
-		return n
-	}
-	return 0
-}
-
-// hasVersion reports whether a header value contains a version-looking token
-// (a digit adjacent to a '.' or '/'), e.g. "nginx/1.25.3" or "Apache/2.4".
-func hasVersion(v string) bool {
-	for i := 0; i < len(v); i++ {
-		c := v[i]
-		if c >= '0' && c <= '9' {
-			// only treat as a version if preceded by '/' or '.' somewhere
-			if strings.ContainsAny(v, "/.") {
-				return true
-			}
+		if !curHashes[p.FindingHash] {
+			p.ID = ""
+			p.ScanID = job.ScanID
+			p.Status = model.FindingFixed
+			p.IgnoreReason = nil
+			current = append(current, p)
 		}
 	}
-	return false
-}
-
-// stubSAST returns representative placeholder findings. Full SAST integration
-// (Semgrep + GitHub PR checkout into tmpfs) is future work; these rows are real
-// but clearly labeled as stubs so the UI and triage flow can be exercised.
-func stubSAST(location string) []model.ScanFinding {
-	fp1 := "config/database.go"
-	ln1 := 42
-	fp2 := "internal/auth/token.go"
-	ln2 := 88
-	return []model.ScanFinding{
-		{
-			RuleID:      "sast.hardcoded-secret",
-			Severity:    model.SeverityMedium,
-			Title:       "[STUB] Hardcoded credential detected — full SAST (Semgrep/GitHub) integration is future",
-			FilePath:    &fp1,
-			Line:        &ln1,
-			FindingHash: model.FindingHash("sast.hardcoded-secret", "config/database.go:42"),
-			Status:      model.FindingOpen,
-		},
-		{
-			RuleID:      "sast.weak-crypto",
-			Severity:    model.SeverityLow,
-			Title:       "[STUB] Weak cryptographic algorithm (MD5) — full SAST (Semgrep/GitHub) integration is future",
-			FilePath:    &fp2,
-			Line:        &ln2,
-			FindingHash: model.FindingHash("sast.weak-crypto", "internal/auth/token.go:88"),
-			Status:      model.FindingOpen,
-		},
-	}
+	return current, nil
 }

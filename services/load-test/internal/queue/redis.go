@@ -60,6 +60,18 @@ func (r *Redis) DequeueScan(ctx context.Context) (model.ScanJob, error) {
 	return j, err
 }
 
+func srcTokenKey(token string) string { return "klaro:scan-src:" + token }
+
+// PutSrcToken records token→orgID with a TTL ([M-2]).
+func (r *Redis) PutSrcToken(ctx context.Context, token, orgID string, ttl time.Duration) error {
+	return r.c.Set(ctx, srcTokenKey(token), orgID, ttl).Err()
+}
+
+// GetSrcToken returns the org that owns token, or an error if absent/expired.
+func (r *Redis) GetSrcToken(ctx context.Context, token string) (string, error) {
+	return r.c.Get(ctx, srcTokenKey(token)).Result()
+}
+
 func abortChan(id string) string   { return "klaro:abort:" + id }
 func metricsChan(id string) string { return "klaro:metrics:" + id }
 
@@ -102,4 +114,5 @@ func (r *Redis) SubscribeMetrics(ctx context.Context, id string) (<-chan []byte,
 
 var _ JobQueue = (*Redis)(nil)
 var _ ScanQueue = (*Redis)(nil)
+var _ SrcTokenStore = (*Redis)(nil)
 var _ Signaler = (*Redis)(nil)

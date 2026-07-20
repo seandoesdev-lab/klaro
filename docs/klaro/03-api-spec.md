@@ -187,14 +187,47 @@
 
 ### 3.3 보안 스캔
 
+**POST** `/projects/:id/scans/source` — SAST 소스 아카이브 업로드 (Phase 2, min=member)
+```
+Content-Type: multipart/form-data
+field: file = 소스 아카이브(.tar / .tar.gz / .tgz / .zip, ≤200MB)
+```
+```json
+// res 201
+{ "upload_token": "3f9c...e1", "expires_in": 3600 }
+```
+> 아카이브 바이트는 **공유 tmpfs(RAM)** staging 에만 기록되고 DB/디스크에 저장되지 않는다([EPHEM-01]). 반환된 `upload_token` 을 곧바로 `POST /scans` 의 소스 입력으로 사용한다(TTL 후 만료).
+
 **POST** `/projects/:id/scans`
 ```json
-// req (DAST)
-{ "type": "dast", "target_url": "https://staging.example.com" }
-// req (SAST via PR)
-{ "type": "sast", "pr_number": 42 }
+// req (DAST) — mode 는 baseline(기본)|active, active 도 [SC-01] 검증 도메인 게이트 하에서만
+{ "type": "dast", "target_url": "https://staging.example.com", "mode": "baseline" }
+// req (SAST) — repo_url XOR upload_token 필수([SAST-03]). ref 는 선택(branch/tag)
+{ "type": "sast", "repo_url": "https://github.com/acme/app", "ref": "main" }
+{ "type": "sast", "upload_token": "3f9c...e1" }
 // res 202
 { "id": "uuid", "status": "pending" }
+// res 400 VALIDATION_ERROR — SAST 소스 입력 누락/중복(둘 다 또는 둘 다 없음), 잘못된 target_url/type
+// res 403 DOMAIN_NOT_VERIFIED — DAST 대상 도메인 미검증([SC-01])
+```
+> Phase 2: SAST 는 공개 repo clone 또는 업로드 아카이브만 지원한다. GitHub App PR 체크아웃·PR 코멘트 게시·`POST /webhooks/github`(§4) 는 **후속 GitHub 연동 페이즈**(Phase 2 미구현). `pr_number` 는 trigger 라벨로만 유지되며 소스 식별에는 쓰이지 않는다.
+
+**GET** `/scans/:id/findings` — 스캔 결과 목록
+```json
+// res 200 (증거 필드는 스캐너별로 채워지며 omitempty)
+{ "data": [
+  { "id": "uuid", "rule_id": "sast.semgrep.go.lang.security...", "severity": "high",
+    "title": "MD5 is a weak hash", "file_path": "internal/auth/token.go", "line": 88,
+    "finding_hash": "…", "status": "open", "cwe": "CWE-327", "confidence": "HIGH",
+    "evidence": { "lines": "…(≤10줄)…", "message": "…", "references": ["…"] } },
+  { "id": "uuid", "rule_id": "osv.GHSA-xxxx", "severity": "critical",
+    "title": "lodash 4.17.0: Prototype pollution", "status": "open",
+    "package": "lodash", "package_version": "4.17.0",
+    "evidence": { "advisory": "GHSA-xxxx", "cvss": "…", "summary": "…" } },
+  { "id": "uuid", "rule_id": "zap.40012", "severity": "high",
+    "title": "Cross Site Scripting (Reflected)", "status": "open", "cwe": "79",
+    "evidence": { "url": "https://…/search", "param": "q", "evidence": "<script>", "solution": "…" } }
+] }
 ```
 
 **PATCH** `/scans/:id/findings/:findingId` — 오탐 처리
@@ -204,6 +237,7 @@
 // res 200
 { "id": "uuid", "status": "ignored" }
 ```
+> 재스캔 시 `finding_hash` 로 매칭해 `ignored` 상태·사유를 승계하고, 이전 스캔에 있었으나 이번에 사라진 finding 은 `fixed` 로 판정한다([SC-04]).
 
 ### 3.4 리포트 & 공유
 
@@ -285,7 +319,7 @@ Header: X-Report-Password: s3cret
 
 ## 4. 웹훅
 
-**POST** `/webhooks/github` — `pull_request` 이벤트 → SAST 스캔 트리거. 서명(`X-Hub-Signature-256`) 검증.
+**POST** `/webhooks/github` — `pull_request` 이벤트 → SAST 스캔 트리거. 서명(`X-Hub-Signature-256`) 검증. **(후속 GitHub 연동 페이즈, Phase 2 미구현.** Phase 2 SAST 는 §3.3 의 repo clone/업로드 경로만 지원.)
 
 **POST** `/webhooks/stripe` — `invoice.*`, `customer.subscription.*` → 구독 상태 동기화. 서명(`Stripe-Signature`) 검증.
 

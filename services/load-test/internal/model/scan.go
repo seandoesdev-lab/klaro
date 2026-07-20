@@ -3,6 +3,8 @@ package model
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -71,6 +73,9 @@ type Scan struct {
 	Trigger    ScanTrigger `json:"trigger"`
 	TargetURL  *string     `json:"target_url,omitempty"`
 	PRNumber   *int        `json:"pr_number,omitempty"`
+	SourceType *string     `json:"source_type,omitempty"` // 'repo' | 'upload' (sast)
+	SourceRef  *string     `json:"source_ref,omitempty"`  // repo URL or uploaded filename (pointer only)
+	Mode       *string     `json:"mode,omitempty"`        // 'baseline' | 'active' (dast)
 	Status     ScanStatus  `json:"status"`
 	Score      *int        `json:"score,omitempty"`
 	StartedAt  *time.Time  `json:"started_at,omitempty"`
@@ -79,37 +84,64 @@ type Scan struct {
 }
 
 // ScanFinding is a single security issue produced by a scan.
+//
+// [SC-05] evidence and the common columns (cwe/confidence/package/...) let a
+// finding faithfully represent Semgrep/osv/ZAP output. [EPHEM-01] Evidence carries
+// only a capped snippet / scanner metadata — never a full source copy.
 type ScanFinding struct {
-	ID           string        `json:"id"`
-	ScanID       string        `json:"scan_id"`
-	RuleID       string        `json:"rule_id"`
-	Severity     Severity      `json:"severity"`
-	Title        string        `json:"title"`
-	FilePath     *string       `json:"file_path,omitempty"`
-	Line         *int          `json:"line,omitempty"`
-	FindingHash  string        `json:"finding_hash"`
-	Status       FindingStatus `json:"status"`
-	IgnoreReason *string       `json:"ignore_reason,omitempty"`
-	CreatedAt    time.Time     `json:"created_at"`
+	ID             string          `json:"id"`
+	ScanID         string          `json:"scan_id"`
+	RuleID         string          `json:"rule_id"`
+	Severity       Severity        `json:"severity"`
+	Title          string          `json:"title"`
+	FilePath       *string         `json:"file_path,omitempty"`
+	Line           *int            `json:"line,omitempty"`
+	FindingHash    string          `json:"finding_hash"`
+	Status         FindingStatus   `json:"status"`
+	IgnoreReason   *string         `json:"ignore_reason,omitempty"`
+	CWE            *string         `json:"cwe,omitempty"`
+	Confidence     *string         `json:"confidence,omitempty"`
+	Package        *string         `json:"package,omitempty"`
+	PackageVersion *string         `json:"package_version,omitempty"`
+	Evidence       json.RawMessage `json:"evidence,omitempty"` // jsonb
+	CreatedAt      time.Time       `json:"created_at"`
+}
+
+// ScanSource identifies the SAST source tree to acquire (repo clone or upload).
+type ScanSource struct {
+	Type    string `json:"type,omitempty"` // repo|upload
+	RepoURL string `json:"repo_url,omitempty"`
+	Ref     string `json:"ref,omitempty"`
+	Token   string `json:"token,omitempty"`
 }
 
 // ScanJob is the queue payload consumed by the scan worker.
 type ScanJob struct {
-	ScanID    string   `json:"scan_id"`
-	OrgID     string   `json:"org_id"`
-	ProjectID string   `json:"project_id"`
-	Type      ScanType `json:"type"`
-	TargetURL string   `json:"target_url"`
+	ScanID    string     `json:"scan_id"`
+	OrgID     string     `json:"org_id"`
+	ProjectID string     `json:"project_id"`
+	Type      ScanType   `json:"type"`
+	TargetURL string     `json:"target_url"`
+	Mode      string     `json:"mode,omitempty"`   // dast
+	Source    ScanSource `json:"source,omitempty"` // sast
 }
 
 // FindingHash is a stable hash of rule_id + location, used to match a finding
 // across re-scans so triage state (ignored/fixed) is preserved.
 func FindingHash(ruleID, location string) string {
-	sum := sha256.Sum256([]byte(ruleID + "|" + location))
+	return FindingHashParts(ruleID, location)
+}
+
+// FindingHashParts hashes an ordered list of stable identity parts joined by "|".
+// SAST uses (rule_id, repo-relative path, normalized snippet) so line shifts don't
+// break triage; osv uses (rule_id, package, version); DAST/ZAP uses (rule_id, url,
+// param). Header analysis keeps the 2-part (rule_id, location) form via FindingHash.
+func FindingHashParts(parts ...string) string {
+	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
 	return hex.EncodeToString(sum[:])
 }
 
-// severityWeight is the score penalty for a finding of a given severity.
+// severityWeight is the per-finding score penalty by severity.
 var severityWeight = map[Severity]int{
 	SeverityCritical: 25,
 	SeverityHigh:     15,
@@ -118,15 +150,37 @@ var severityWeight = map[Severity]int{
 	SeverityInfo:     1,
 }
 
-// ComputeScore starts at 100 and subtracts a penalty per finding by severity,
-// with a floor of 0.
+// severityCap caps the total penalty a single severity bucket can contribute, so
+// a flood of same-severity findings can't instantly pin the score to 0 (design #6).
+var severityCap = map[Severity]int{
+	SeverityCritical: 40,
+	SeverityHigh:     30,
+	SeverityMedium:   20,
+	SeverityLow:      8,
+	SeverityInfo:     2,
+}
+
+// ComputeScore = max(0, 100 - Σ_bucket min(cap, weight×openCount)), counting only
+// open findings (ignored/fixed excluded so triage is reflected). Bucket caps give
+// gradation instead of an immediate floor at 0 under a real-engine finding flood.
 func ComputeScore(findings []ScanFinding) int {
-	score := 100
+	counts := map[Severity]int{}
 	for _, f := range findings {
-		score -= severityWeight[f.Severity]
+		if f.Status != FindingOpen {
+			continue // ignored/fixed don't penalize the score
+		}
+		counts[f.Severity]++
 	}
-	if score < 0 {
-		score = 0
+	penalty := 0
+	for sev, n := range counts {
+		p := severityWeight[sev] * n
+		if cap := severityCap[sev]; p > cap {
+			p = cap
+		}
+		penalty += p
 	}
-	return score
+	if penalty > 100 {
+		penalty = 100
+	}
+	return 100 - penalty
 }

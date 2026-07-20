@@ -165,8 +165,11 @@ github_installations 1──∞ projects
 | target_url | text nullable | DAST 대상(검증 도메인) |
 | pr_number | int nullable | SAST(PR) |
 | status | enum(pending, running, completed, failed) | |
-| score | int nullable | 보안 점수 |
+| score | int nullable | 보안 점수([SC-05] ComputeScore: open finding만 집계, severity 버킷 상한) |
 | started_at / finished_at | timestamptz | |
+| source_type | text nullable | Phase 2(0009): SAST 소스 종류 `repo`\|`upload`. CHECK 제약 |
+| source_ref | text nullable | Phase 2(0009): repo URL 또는 업로드 파일명 — **포인터/라벨만, 소스 본문 아님**([EPHEM-01]) |
+| mode | text nullable | Phase 2(0009): DAST `baseline`\|`active`. CHECK 제약([DAST-01]) |
 
 **scan_findings**
 | 컬럼 | 타입 | 비고 |
@@ -174,14 +177,21 @@ github_installations 1──∞ projects
 | id | uuid PK | |
 | org_id | uuid FK→organizations | Phase 1: RLS 비정규화 컬럼(D-9), scans 로부터 백필 |
 | scan_id | uuid FK→scans | |
-| rule_id | text | Semgrep/ZAP 룰 |
+| rule_id | text | Semgrep(`sast.semgrep.*`)/osv(`osv.*`)/ZAP(`zap.*`)/헤더분석(`dast.header.*`) 네임스페이스 |
 | severity | enum(critical, high, medium, low, info) | |
 | title | text | |
-| file_path / line | text / int nullable | SAST |
-| finding_hash | text | 재스캔 매칭용(오탐 상태 유지) |
+| file_path / line | text / int nullable | SAST(repo 상대경로; line은 표시용, hash 제외) |
+| finding_hash | text | 재스캔 매칭용(오탐 상태 유지). SAST=rule+path+정규화 스니펫, osv=rule+pkg+ver, ZAP=rule+url+param |
 | status | enum(open, ignored, fixed) | |
 | ignore_reason | text nullable | [SC-04] |
+| evidence | jsonb nullable | Phase 2(0009): 스캐너별 증거([SC-05]). **스니펫 ≤10줄만, 소스 전체 사본 금지**([EPHEM-01]) |
+| cwe | text nullable | Phase 2(0009): CWE 식별자(Semgrep metadata / ZAP cweid) |
+| confidence | text nullable | Phase 2(0009): 스캐너 신뢰도(high/medium/low) |
+| package | text nullable | Phase 2(0009): osv 취약 패키지명 |
+| package_version | text nullable | Phase 2(0009): osv 취약 버전 |
 | created_at | timestamptz | |
+
+> **Phase 2 마이그레이션 0009**: 위 신규 컬럼은 전부 `ADD COLUMN IF NOT EXISTS`(nullable)로 추가되어 재실행·하위호환 안전하다. `scans`/`scan_findings`의 `org_isolation` FORCE RLS(0006)는 ADD COLUMN 영향을 받지 않아 확장 컬럼도 자동으로 org 스코프 보호된다. 소스 본문/아카이브 바이트를 저장하는 컬럼은 신설하지 않는다([EPHEM-01]).
 
 ### 2.5 APM (S3)
 

@@ -54,6 +54,7 @@ func main() {
 		Store:     st,
 		Queue:     rd,
 		ScanQueue: rd,
+		SrcTokens: rd,
 		Signal:    rd,
 		Verifier:  domainverify.New(),
 		JWT:       auth.NewJWTManager(env("JWT_SECRET", "dev-insecure-jwt-secret")),

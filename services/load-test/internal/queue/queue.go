@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"time"
 
 	"github.com/klaro/load-test/internal/model"
 )
@@ -15,6 +16,13 @@ type JobQueue interface {
 type ScanQueue interface {
 	EnqueueScan(ctx context.Context, j model.ScanJob) error
 	DequeueScan(ctx context.Context) (model.ScanJob, error)
+}
+
+// SrcTokenStore binds a SAST upload token to the org that uploaded it, with a TTL
+// ([M-2] tenant isolation of staged source archives).
+type SrcTokenStore interface {
+	PutSrcToken(ctx context.Context, token, orgID string, ttl time.Duration) error
+	GetSrcToken(ctx context.Context, token string) (string, error)
 }
 
 type Signaler interface {
