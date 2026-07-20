@@ -96,6 +96,7 @@ type ScanFinding struct {
 // ScanJob is the queue payload consumed by the scan worker.
 type ScanJob struct {
 	ScanID    string   `json:"scan_id"`
+	OrgID     string   `json:"org_id"`
 	ProjectID string   `json:"project_id"`
 	Type      ScanType `json:"type"`
 	TargetURL string   `json:"target_url"`

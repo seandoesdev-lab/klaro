@@ -6,8 +6,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/klaro/load-test/internal/auth"
 	"github.com/klaro/load-test/internal/domainverify"
 	"github.com/klaro/load-test/internal/queue"
+	"github.com/klaro/load-test/internal/rbac"
 	"github.com/klaro/load-test/internal/store"
 )
 
@@ -20,7 +22,11 @@ type Deps struct {
 	ScanQueue queue.ScanQueue
 	Signal    queue.Signaler
 	Verifier  *domainverify.Verifier
+	JWT       *auth.JWTManager
+	Refresh   *auth.RefreshStore
+	OAuth     *auth.OAuthManager
 	DevToken  string
+	AppEnv    string // "dev" 에서만 dev-token 활성(D-1)
 }
 
 func NewRouter(d Deps) *gin.Engine {
@@ -29,48 +35,82 @@ func NewRouter(d Deps) *gin.Engine {
 	r.Use(gin.Recovery())
 
 	r.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
-
-	// 대시보드 UI는 인증 그룹 밖에서 같은 오리진으로 서빙(CORS 불필요)
 	r.GET("/", func(c *gin.Context) { c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML) })
 
-	// WS는 인증 그룹 밖에 등록(Task 8에서 실제 구현으로 교체)
+	// WS는 인증 그룹 밖(실시간 스트림). 공유 리포트/ingest 도 특례 경로.
 	registerWS(r, d)
-
-	// APM ingest는 dev bearer가 아니라 X-Ingest-Token으로 인증 → 인증 그룹 밖.
-	r.POST("/projects/:id/apm/ingest", d.apmIngest)
-	// 공유 리포트는 healthz처럼 public.
+	r.POST("/projects/:id/apm/ingest", d.authenticateIngest, d.tenancyTx, d.apmIngest)
 	r.GET("/shared/:slug", d.getSharedReport)
 
-	auth := r.Group("/", authStub(d.DevToken))
+	// ── 인증(public) ──────────────────────────────────────────────────────────
+	av := r.Group("/v1/auth")
 	{
-		auth.POST("/projects/:id/domains", d.createDomain)
-		auth.GET("/projects/:id/domains", d.listDomains)
-		auth.POST("/projects/:id/domains/:domainId/verify", d.verifyDomain)
-		auth.POST("/projects/:id/load-tests", d.createLoadTest)
-		auth.GET("/projects/:id/load-tests", d.listLoadTests)
-		auth.GET("/load-tests/:id", d.getLoadTest)
-		auth.POST("/load-tests/:id/abort", d.abortLoadTest)
-		auth.GET("/load-tests/:id/results", d.getResults)
-		auth.POST("/projects/:id/scans", d.createScan)
-		auth.GET("/projects/:id/scans", d.listScans)
-		auth.GET("/scans/:id", d.getScan)
-		auth.GET("/scans/:id/findings", d.listFindings)
-		auth.PATCH("/scans/:id/findings/:findingId", d.updateFinding)
+		av.POST("/signup", d.signup)
+		av.POST("/login", d.login)
+		av.POST("/refresh", d.refresh)
+		av.POST("/logout", d.logout)
+		av.GET("/oauth/:provider", d.oauthStart)
+		av.GET("/oauth/:provider/callback", d.oauthCallback)
+	}
+
+	// ── org 목록/생성 (authenticate 만; org 스코프 미확정) ─────────────────────────
+	ao := r.Group("/v1", d.authenticate)
+	{
+		ao.GET("/orgs", d.listOrgs)
+		ao.POST("/orgs", d.createOrg)
+	}
+
+	// ── org 스코프(authenticate → resolveOrg → tenancyTx; 라우트별 authorize) ─────
+	V := rbac.RoleViewer
+	M := rbac.RoleMember
+	A := rbac.RoleAdmin
+	g := r.Group("/", d.authenticate, d.resolveOrg, d.tenancyTx)
+	{
+		// 멤버 (v1)
+		g.GET("/v1/orgs/:orgId/members", d.authorize(M), d.listMembers)
+		g.POST("/v1/orgs/:orgId/members", d.authorize(A), d.addMember)
+		g.PATCH("/v1/orgs/:orgId/members/:userId", d.authorize(A), d.updateMember)
+		g.DELETE("/v1/orgs/:orgId/members/:userId", d.authorize(A), d.removeMember)
+		// API Key (v1)
+		g.GET("/v1/orgs/:orgId/api-keys", d.authorize(A), d.listApiKeys)
+		g.POST("/v1/orgs/:orgId/api-keys", d.authorize(A), d.createApiKey)
+		g.DELETE("/v1/orgs/:orgId/api-keys/:id", d.authorize(A), d.revokeApiKey)
+		// 프로젝트 (v1)
+		g.GET("/v1/projects", d.authorize(V), d.listProjects)
+		g.POST("/v1/projects", d.authorize(M), d.createProject)
+		g.GET("/v1/projects/:id", d.authorize(V), d.getProject)
+		g.PATCH("/v1/projects/:id", d.authorize(M), d.updateProject)
+		g.DELETE("/v1/projects/:id", d.authorize(A), d.deleteProject)
+
+		// ── 기존 리소스 라우트(경로 유지, X-Org-Id 필수) ──────────────────────────
+		g.POST("/projects/:id/domains", d.authorize(M), d.createDomain)
+		g.GET("/projects/:id/domains", d.authorize(V), d.listDomains)
+		g.POST("/projects/:id/domains/:domainId/verify", d.authorize(M), d.verifyDomain)
+		g.POST("/projects/:id/load-tests", d.authorize(M), d.createLoadTest)
+		g.GET("/projects/:id/load-tests", d.authorize(V), d.listLoadTests)
+		g.GET("/load-tests/:id", d.authorize(V), d.getLoadTest)
+		g.POST("/load-tests/:id/abort", d.authorize(M), d.abortLoadTest)
+		g.GET("/load-tests/:id/results", d.authorize(V), d.getResults)
+		g.POST("/projects/:id/scans", d.authorize(M), d.createScan)
+		g.GET("/projects/:id/scans", d.authorize(V), d.listScans)
+		g.GET("/scans/:id", d.authorize(V), d.getScan)
+		g.GET("/scans/:id/findings", d.authorize(V), d.listFindings)
+		g.PATCH("/scans/:id/findings/:findingId", d.authorize(M), d.updateFinding)
 
 		// APM (S3)
-		auth.POST("/projects/:id/apm/agents", d.createAgent)
-		auth.GET("/projects/:id/apm/agents", d.listAgents)
-		auth.GET("/projects/:id/apm/traces", d.listSlowTraces)
-		auth.GET("/projects/:id/apm/traces/:traceId", d.getTrace)
-		auth.GET("/projects/:id/apm/logs", d.listApmLogs)
-		auth.POST("/projects/:id/apm/demo", d.seedApmDemo)
+		g.POST("/projects/:id/apm/agents", d.authorize(M), d.createAgent)
+		g.GET("/projects/:id/apm/agents", d.authorize(V), d.listAgents)
+		g.GET("/projects/:id/apm/traces", d.authorize(V), d.listSlowTraces)
+		g.GET("/projects/:id/apm/traces/:traceId", d.authorize(V), d.getTrace)
+		g.GET("/projects/:id/apm/logs", d.authorize(V), d.listApmLogs)
+		g.POST("/projects/:id/apm/demo", d.authorize(M), d.seedApmDemo)
 
 		// Reports (S4)
-		auth.POST("/projects/:id/reports", d.createReport)
-		auth.GET("/projects/:id/reports", d.listReports)
-		auth.GET("/reports/:id", d.getReport)
-		auth.POST("/reports/:id/share", d.createShare)
-		auth.DELETE("/reports/:id/share/:shareId", d.revokeShare)
+		g.POST("/projects/:id/reports", d.authorize(M), d.createReport)
+		g.GET("/projects/:id/reports", d.authorize(V), d.listReports)
+		g.GET("/reports/:id", d.authorize(V), d.getReport)
+		g.POST("/reports/:id/share", d.authorize(M), d.createShare)
+		g.DELETE("/reports/:id/share/:shareId", d.authorize(M), d.revokeShare)
 	}
 	return r
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/klaro/load-test/internal/model"
 	"github.com/klaro/load-test/internal/scenario"
 	"github.com/klaro/load-test/internal/store"
+	"github.com/klaro/load-test/internal/tenancy"
 )
 
 func (d Deps) createLoadTest(c *gin.Context) {
@@ -30,9 +31,11 @@ func (d Deps) createLoadTest(c *gin.Context) {
 		return
 	}
 	pid := projectID(c)
-	verified, err := d.Store.IsDomainVerified(c, pid, host)
+	tx := tenancy.Tx(c)
+	orgID := tenancy.OrgID(c)
+	verified, err := d.Store.IsDomainVerified(c, tx, pid, host)
 	if err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 	if !verified {
@@ -40,42 +43,42 @@ func (d Deps) createLoadTest(c *gin.Context) {
 		return
 	}
 	lt := &model.LoadTest{
-		ProjectID: pid, TargetURL: req.TargetURL, Scenario: req.Scenario,
+		OrgID: orgID, ProjectID: pid, TargetURL: req.TargetURL, Scenario: req.Scenario,
 		VU: req.Scenario.VU, DurationSec: req.Scenario.DurationSec, Status: model.StatusValidating,
 	}
-	if err := d.Store.CreateLoadTest(c, lt); err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+	if err := d.Store.CreateLoadTest(c, tx, lt); err != nil {
+		writeInternal(c, err)
 		return
 	}
-	if err := d.Store.UpdateStatus(c, lt.ID, model.StatusQueued, nil); err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+	if err := d.Store.UpdateStatus(c, tx, lt.ID, model.StatusQueued, nil); err != nil {
+		writeInternal(c, err)
 		return
 	}
-	job := model.Job{LoadTestID: lt.ID, ProjectID: pid, TargetURL: lt.TargetURL, Scenario: lt.Scenario}
+	job := model.Job{LoadTestID: lt.ID, OrgID: orgID, ProjectID: pid, TargetURL: lt.TargetURL, Scenario: lt.Scenario}
 	if err := d.Queue.Enqueue(c, job); err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{"id": lt.ID, "status": model.StatusValidating})
 }
 
 func (d Deps) getLoadTest(c *gin.Context) {
-	lt, err := d.Store.GetLoadTest(c, c.Param("id"))
+	lt, err := d.Store.GetLoadTest(c, tenancy.Tx(c), c.Param("id"))
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(c, 404, "NOT_FOUND", "load test not found", nil)
 		return
 	}
 	if err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, lt)
 }
 
 func (d Deps) listLoadTests(c *gin.Context) {
-	items, err := d.Store.ListLoadTests(c, projectID(c))
+	items, err := d.Store.ListLoadTests(c, tenancy.Tx(c), projectID(c))
 	if err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": items})
@@ -83,25 +86,25 @@ func (d Deps) listLoadTests(c *gin.Context) {
 
 func (d Deps) abortLoadTest(c *gin.Context) {
 	id := c.Param("id")
-	if _, err := d.Store.GetLoadTest(c, id); errors.Is(err, store.ErrNotFound) {
+	if _, err := d.Store.GetLoadTest(c, tenancy.Tx(c), id); errors.Is(err, store.ErrNotFound) {
 		writeError(c, 404, "NOT_FOUND", "load test not found", nil)
 		return
 	}
 	if err := d.Signal.PublishAbort(c, id); err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{"id": id, "status": "aborting"})
 }
 
 func (d Deps) getResults(c *gin.Context) {
-	r, err := d.Store.GetResult(c, c.Param("id"))
+	r, err := d.Store.GetResult(c, tenancy.Tx(c), c.Param("id"))
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(c, 404, "NOT_FOUND", "results not ready", nil)
 		return
 	}
 	if err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, r)

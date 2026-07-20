@@ -36,6 +36,7 @@ type VerifiedDomain struct {
 
 type LoadTest struct {
 	ID            string     `json:"id"`
+	OrgID         string     `json:"-"`
 	ProjectID     string     `json:"-"`
 	TargetURL     string     `json:"target_url"`
 	Scenario      Scenario   `json:"scenario"`
@@ -61,6 +62,7 @@ type LoadTestResult struct {
 
 type Job struct {
 	LoadTestID string   `json:"load_test_id"`
+	OrgID      string   `json:"org_id"`
 	ProjectID  string   `json:"project_id"`
 	TargetURL  string   `json:"target_url"`
 	Scenario   Scenario `json:"scenario"`

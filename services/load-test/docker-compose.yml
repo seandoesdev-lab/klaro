@@ -7,7 +7,11 @@ services:
       POSTGRES_DB: klaro
     ports: ["5432:5432"]
     volumes:
-      - ./migrations/0001_init.sql:/docker-entrypoint-initdb.d/0001_init.sql:ro
+      # 명명 볼륨: 익명 볼륨과 달리 `docker compose down -v` 로 명시적 초기화 가능.
+      # 주의: 마이그레이션(0001~0008)을 변경하면 initdb 재실행을 위해 `down -v` 필요.
+      - klaro_pgdata:/var/lib/postgresql/data
+      # 전체 마이그레이션을 사전순(0001..0008)으로 initdb 에 적용.
+      - ./migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U klaro"]
       interval: 2s
@@ -21,9 +25,19 @@ services:
   api:
     build: { context: ., dockerfile: Dockerfile.api }
     environment:
-      DATABASE_URL: postgres://klaro:klaro@postgres:5432/klaro?sslmode=disable
+      # klaro_app: RLS 강제(NOBYPASSRLS) / klaro_system: BYPASSRLS 부트스트랩 전용
+      DATABASE_URL: postgres://klaro_app:klaro_app@postgres:5432/klaro?sslmode=disable
+      SYSTEM_DATABASE_URL: postgres://klaro_system:klaro_system@postgres:5432/klaro?sslmode=disable
       REDIS_ADDR: redis:6379
+      APP_ENV: dev
       DEV_TOKEN: dev
+      JWT_SECRET: dev-insecure-jwt-secret
+      OAUTH_REDIRECT_BASE: http://localhost:8080
+      # OAuth provider 크리덴셜 미설정 → dev mock 콜백(D-3). 실사용 시 아래 주입.
+      # GITHUB_CLIENT_ID: ""
+      # GITHUB_CLIENT_SECRET: ""
+      # GOOGLE_CLIENT_ID: ""
+      # GOOGLE_CLIENT_SECRET: ""
     ports: ["8080:8080"]
     depends_on:
       postgres: { condition: service_healthy }
@@ -32,10 +46,14 @@ services:
   worker:
     build: { context: ., dockerfile: Dockerfile.worker }
     environment:
-      DATABASE_URL: postgres://klaro:klaro@postgres:5432/klaro?sslmode=disable
+      DATABASE_URL: postgres://klaro_app:klaro_app@postgres:5432/klaro?sslmode=disable
+      SYSTEM_DATABASE_URL: postgres://klaro_system:klaro_system@postgres:5432/klaro?sslmode=disable
       REDIS_ADDR: redis:6379
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_started }
+
+volumes:
+  klaro_pgdata:

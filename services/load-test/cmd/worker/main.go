@@ -23,7 +23,22 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	st, err := store.New(ctx, env("DATABASE_URL", "postgres://klaro:klaro@localhost:5432/klaro?sslmode=disable"))
+	appEnv := env("APP_ENV", "dev")
+	appDSN := env("DATABASE_URL", "postgres://klaro_app:klaro_app@localhost:5432/klaro?sslmode=disable")
+	sysRaw := os.Getenv("SYSTEM_DATABASE_URL")
+	if appEnv != "dev" { // F-4 fail-fast: 프로덕션은 별도 klaro_system DSN 필수
+		if sysRaw == "" {
+			log.Fatal("SYSTEM_DATABASE_URL must be set in non-dev environments (F-4)")
+		}
+		if sysRaw == appDSN {
+			log.Fatal("SYSTEM_DATABASE_URL must differ from DATABASE_URL (F-4)")
+		}
+	}
+	sysDSN := sysRaw
+	if sysDSN == "" {
+		sysDSN = "postgres://klaro_system:klaro_system@localhost:5432/klaro?sslmode=disable"
+	}
+	st, err := store.New(ctx, appDSN, sysDSN)
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -7,6 +7,8 @@ import (
 	"sort"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/klaro/load-test/internal/model"
 	"github.com/klaro/load-test/internal/queue"
 	"github.com/klaro/load-test/internal/scenario"
@@ -40,14 +42,21 @@ func Run(ctx context.Context, d Deps) {
 
 func (d Deps) process(ctx context.Context, job model.Job) error {
 	id := job.LoadTestID
-	_ = d.Store.UpdateStatus(ctx, id, model.StatusProvisioning, nil)
+	// org 스코프 실행 헬퍼: 각 DB write 를 짧은 org tx(RLS 관통)로 감싼다(설계 §6.4).
+	setStatus := func(to model.Status, reason *string) error {
+		return d.Store.RunInOrg(ctx, job.OrgID, func(tx pgx.Tx) error {
+			return d.Store.UpdateStatus(ctx, tx, id, to, reason)
+		})
+	}
+
+	_ = setStatus(model.StatusProvisioning, nil)
 	script, err := scenario.Generate(job.Scenario)
 	if err != nil {
-		_ = d.Store.UpdateStatus(ctx, id, model.StatusFailed, nil)
+		_ = setStatus(model.StatusFailed, nil)
 		return err
 	}
-	_ = d.Store.UpdateStatus(ctx, id, model.StatusRunning, nil)
-	_ = d.Store.MarkStarted(ctx, id)
+	_ = setStatus(model.StatusRunning, nil)
+	_ = d.Store.RunInOrg(ctx, job.OrgID, func(tx pgx.Tx) error { return d.Store.MarkStarted(ctx, tx, id) })
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -99,20 +108,22 @@ func (d Deps) process(ctx context.Context, job model.Job) error {
 
 	if abortReason != "" {
 		reason := abortReason
-		_ = d.Store.UpdateStatus(ctx, id, model.StatusAborted, &reason)
+		_ = setStatus(model.StatusAborted, &reason)
 		payload, _ := json.Marshal(map[string]any{"event": "aborted", "reason": reason})
 		_ = d.Signal.PublishMetric(ctx, id, payload)
 	} else {
-		_ = d.Store.UpdateStatus(ctx, id, model.StatusAggregating, nil)
+		_ = setStatus(model.StatusAggregating, nil)
 	}
 
 	summary := agg.Summary(job.Scenario.VU)
-	if err := d.Store.SaveResult(ctx, id, summary); err != nil {
+	if err := d.Store.RunInOrg(ctx, job.OrgID, func(tx pgx.Tx) error {
+		return d.Store.SaveResult(ctx, tx, id, summary)
+	}); err != nil {
 		return err
 	}
-	_ = d.Store.MarkFinished(ctx, id)
+	_ = d.Store.RunInOrg(ctx, job.OrgID, func(tx pgx.Tx) error { return d.Store.MarkFinished(ctx, tx, id) })
 	if abortReason == "" {
-		_ = d.Store.UpdateStatus(ctx, id, model.StatusCompleted, nil)
+		_ = setStatus(model.StatusCompleted, nil)
 	}
 	return nil
 }

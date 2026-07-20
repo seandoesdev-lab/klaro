@@ -9,6 +9,7 @@ import (
 
 	"github.com/klaro/load-test/internal/model"
 	"github.com/klaro/load-test/internal/store"
+	"github.com/klaro/load-test/internal/tenancy"
 )
 
 // createReport builds inputs from a load test and/or scan, computes scores + a
@@ -27,15 +28,16 @@ func (d Deps) createReport(c *gin.Context) {
 		return
 	}
 	pid := projectID(c)
+	tx := tenancy.Tx(c)
 
-	perf, err := d.perfInput(c, req.LoadTestID)
+	perf, err := d.perfInput(c, tx, req.LoadTestID)
 	if err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
-	sec, err := d.secInput(c, req.ScanID)
+	sec, err := d.secInput(c, tx, req.ScanID)
 	if err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 
@@ -48,24 +50,24 @@ func (d Deps) createReport(c *gin.Context) {
 		PerformanceScore: perfScore, SecurityScore: secScore,
 		AISummary: summary, Status: model.ReportGenerating,
 	}
-	if err := d.Store.CreateReport(c, rep); err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+	if err := d.Store.CreateReport(c, tx, rep); err != nil {
+		writeInternal(c, err)
 		return
 	}
 	// Synchronous generation: flip to ready immediately.
-	if err := d.Store.UpdateReport(c, rep.ID, perfScore, secScore, summary, model.ReportReady); err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+	if err := d.Store.UpdateReport(c, tx, rep.ID, perfScore, secScore, summary, model.ReportReady); err != nil {
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{"id": rep.ID, "status": model.ReportReady})
 }
 
 // perfInput reads load_test_results for a load test, if provided.
-func (d Deps) perfInput(c *gin.Context, loadTestID *string) (model.PerfInput, error) {
+func (d Deps) perfInput(c *gin.Context, tx store.Querier, loadTestID *string) (model.PerfInput, error) {
 	if loadTestID == nil {
 		return model.PerfInput{}, nil
 	}
-	r, err := d.Store.GetResult(c, *loadTestID)
+	r, err := d.Store.GetResult(c, tx, *loadTestID)
 	if errors.Is(err, store.ErrNotFound) {
 		return model.PerfInput{}, nil // no results yet → skip perf scoring
 	}
@@ -83,18 +85,18 @@ func (d Deps) perfInput(c *gin.Context, loadTestID *string) (model.PerfInput, er
 }
 
 // secInput reads a scan + its finding severity counts, if provided.
-func (d Deps) secInput(c *gin.Context, scanID *string) (model.SecInput, error) {
+func (d Deps) secInput(c *gin.Context, tx store.Querier, scanID *string) (model.SecInput, error) {
 	if scanID == nil {
 		return model.SecInput{}, nil
 	}
-	sc, err := d.Store.GetScan(c, *scanID)
+	sc, err := d.Store.GetScan(c, tx, *scanID)
 	if errors.Is(err, store.ErrNotFound) {
 		return model.SecInput{}, nil
 	}
 	if err != nil {
 		return model.SecInput{}, err
 	}
-	counts, err := d.Store.SeverityCounts(c, *scanID)
+	counts, err := d.Store.SeverityCounts(c, tx, *scanID)
 	if err != nil {
 		return model.SecInput{}, err
 	}
@@ -110,22 +112,22 @@ func (d Deps) secInput(c *gin.Context, scanID *string) (model.SecInput, error) {
 }
 
 func (d Deps) listReports(c *gin.Context) {
-	items, err := d.Store.ListReports(c, projectID(c))
+	items, err := d.Store.ListReports(c, tenancy.Tx(c), projectID(c))
 	if err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": items})
 }
 
 func (d Deps) getReport(c *gin.Context) {
-	rep, err := d.Store.GetReport(c, c.Param("id"))
+	rep, err := d.Store.GetReport(c, tenancy.Tx(c), c.Param("id"))
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(c, 404, "NOT_FOUND", "report not found", nil)
 		return
 	}
 	if err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, rep)
@@ -133,7 +135,8 @@ func (d Deps) getReport(c *gin.Context) {
 
 func (d Deps) createShare(c *gin.Context) {
 	reportID := c.Param("id")
-	if _, err := d.Store.GetReport(c, reportID); errors.Is(err, store.ErrNotFound) {
+	tx := tenancy.Tx(c)
+	if _, err := d.Store.GetReport(c, tx, reportID); errors.Is(err, store.ErrNotFound) {
 		writeError(c, 404, "NOT_FOUND", "report not found", nil)
 		return
 	}
@@ -153,9 +156,9 @@ func (d Deps) createShare(c *gin.Context) {
 		t := time.Now().UTC().Add(time.Duration(req.ExpiresInDay) * 24 * time.Hour)
 		expires = &t
 	}
-	sh, err := d.Store.CreateShare(c, reportID, pwHash, expires)
+	sh, err := d.Store.CreateShare(c, tx, reportID, pwHash, expires)
 	if err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{
@@ -166,13 +169,13 @@ func (d Deps) createShare(c *gin.Context) {
 }
 
 func (d Deps) revokeShare(c *gin.Context) {
-	err := d.Store.RevokeShare(c, c.Param("id"), c.Param("shareId"))
+	err := d.Store.RevokeShare(c, tenancy.Tx(c), c.Param("id"), c.Param("shareId"))
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(c, 404, "NOT_FOUND", "share not found", nil)
 		return
 	}
 	if err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"id": c.Param("shareId"), "status": "revoked"})
@@ -186,7 +189,7 @@ func (d Deps) getSharedReport(c *gin.Context) {
 		return
 	}
 	if err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 	if sh.RevokedAt != nil {
@@ -203,9 +206,9 @@ func (d Deps) getSharedReport(c *gin.Context) {
 			return
 		}
 	}
-	rep, err := d.Store.GetReport(c, sh.ReportID)
+	rep, err := d.Store.GetReportSys(c, sh.ReportID)
 	if err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, rep)

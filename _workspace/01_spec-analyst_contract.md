@@ -1,191 +1,256 @@
-# klaro S1 부하 테스트 — 백엔드 MVP 요구사항 계약
+# klaro Phase 1 — 요구사항 계약: 인증 + PostgreSQL RLS 멀티테넌시 기반
 
-**작성** spec-analyst · **버전** v1 · **근거** docs/klaro/01, 02, 03 (보조: 04, 05)
-**확정 스택(재논의 금지)** Control Plane = Go(Gin/Echo) · 로컬 오케스트레이션 = Docker Compose(워커 컨테이너 spawn, K8s Job은 인터페이스 추상화) · 테넌트 격리 = 공용 DB + RLS
+**작성** spec-analyst · **작성일** 2026-07-20 · **상태** 초안(빌더 착수용)
+**단일 진실 공급원** `docs/klaro/00~05` + `CLAUDE.md` 아키텍처 불변식
+**확정 스택 전제** Control Plane = Go 유지, 테넌트 격리 = 공용 DB + RLS(스키마/DB 분리 아님)
+
+> 본 계약은 "무엇을(WHAT) + 수용 기준"만 규정한다. 구현 방식(HOW)은 architect/builder 몫이며, 스택 미확정 항목은 `## architect 결정 필요 목록`으로 분리했다.
 
 ---
 
 ## 범위
 
-이번 세션 한정. **Control Plane(Go) S1 백엔드 + k6 Load Worker**.
+Phase 1은 아래에만 한정한다. 부하/스캔/APM/리포트의 **기능 자체**는 범위 밖이나, 그 리소스에 org 스코프·RLS·RBAC를 소급 적용하는 부분은 포함한다.
 
-포함:
-- 도메인 등록/토큰 발급/소유권 검증 (선행 게이트)
-- API 카탈로그(endpoints) CRUD + 일괄 import
-- 부하 테스트 생성/상태조회/요약결과/시계열조회/중단
-- 실시간 메트릭 WebSocket 스트림
-- k6 워커: 다중 API 가중치 혼합 트래픽 실행, 잡 상태머신, 서킷 브레이커
-- usage 이벤트(VU-Minutes) **발행 지점만** 표시
+1. **인증(AUTH)** — 회원가입, 로그인(JWT Access/Refresh 발급), 토큰 갱신·검증, OAuth 소셜 로그인(GitHub/Google), API Key 인증, 기존 `authStub`(dev-token) 대체.
+2. **인가(RBAC)** — 계층 `Org > Project > Resource`, 역할 `owner/admin/member/viewer` 권한 매트릭스와 강제.
+3. **멀티테넌시 RLS(TENANT)** — 모든 org 스코프 테이블에 `org_id` + Row-Level Security, 세션 변수 `app.current_org` 강제, store 계층 org 컨텍스트 전달.
+4. **데이터 모델(DATA)** — `users`, `memberships`, `api_keys` 신설 및 기존 테이블 `org_id` 보강.
+5. **인증/인가 API(API)** — 로그인·갱신·org/project/멤버 관리·초대·API Key.
 
-제외: 프론트엔드, S2(스캔)/S3(APM)/S4(리포트), Billing 상세 로직(Stripe 계량·초과 과금 계산·구독). Auth/Org/Project CRUD는 전제 의존성으로 가정하되 본 계약의 대상 아님.
+**명시적 제외**: SAML(`POST /auth/saml/acs`, M3, `03-api-spec.md:35`), `github_installations` 연동(별도 GitHub 연동 페이즈), 과금(Billing) 로직 자체(단 `owner`-only 권한 존재는 매트릭스에 기록), 시계열 저장소 분리.
 
-ID 추적: `[LG-01]` 부하테스트 생명주기·실행, `[LG-02]` 실시간 메트릭 스트림, `[LG-03]` 서킷 브레이커, `[LG-04]` 다중 API 가중치 혼합, `[SC-01]` 도메인 소유권 게이트, `[CAT-01]` API 카탈로그, `[BILL-01]` VU-Minutes 계량, `[BILL-02]` 쿼터/초과.
-> 주의: LG-01/LG-02는 docs에 명시 번호가 없어 본 계약이 부여한 추적 ID다(하단 모호/모순 참조).
+---
+
+## 현재 상태 격차 요약 (근거: 실제 파일)
+
+| 영역 | 문서 기대 | 현재 코드 | 격차 |
+|------|-----------|-----------|------|
+| 인증 | JWT+OAuth2 (`00-tech-stack.md:47`, `01-technical-design.md:142`) | 고정 dev-token→고정 project_id, org 개념 없음 (`internal/api/middleware.go:10-25`) | 전면 신설. `middleware.go:13` 주석이 "Replace with JWT/OAuth/RBAC in production (swap point)"로 교체 지점 명시 |
+| 유저/멤버십 | `users`, `memberships`, `api_keys`, `github_installations` 테이블 (`02-data-model.md:41-75`) | 존재하지 않음. `organizations`만 `id/name/created_at` 단순형(`migrations/0001_init.sql:3-7`) | `users`/`memberships`/`api_keys` 미존재 → 신설 |
+| org_id 보유 | "org_id 가진 모든 테이블에 RLS"(`02-data-model.md:272`, `CLAUDE.md` 불변식) | `projects`만 `org_id` 보유(`0001_init.sql:11`). `verified_domains`·`load_tests`·`load_test_results`·`scans`·`scan_findings`·`apm_agents`·`apm_spans`·`apm_logs`·`reports`·`report_shares`는 `project_id`만 있고 `org_id` 없음 | 아래 §RLS 격차표 |
+| RLS 정책 | 전 테넌트 테이블 RLS + `SET app.current_org` (`01-technical-design.md:133`, `02-data-model.md:272`) | 마이그레이션 어디에도 `ENABLE ROW LEVEL SECURITY`/`CREATE POLICY`/`app.current_org` 없음(grep 확인, 0건) | 전면 신설 |
+| 테넌트 스코핑(쿼리) | RLS로 강제 | store가 공유 pool로 `project_id`만 필터. `GetLoadTest`(`store.go:43-62`)·`GetDomain`(`store.go:159-169`)·`GetResult` 등은 **id만으로 조회(테넌트 필터 없음) → 크로스테넌트 읽기(IDOR) 위험** | RLS + store org 컨텍스트로 차단 |
+| 역할 | owner/admin/member/viewer (`01-technical-design.md:70`) | 없음 | 신설 |
+| 시드 | dev org/project 존재(`0001_init.sql:58-62`) | org·project만, **소유 user·membership 없음** → RLS 켜면 dev 흐름 조회 0건 | dev user+membership 시드 필요 |
 
 ---
 
 ## 요구사항 계약
 
-### C1. 도메인 등록 + 검증 토큰 발급 [SC-01] [CAT-01의 전제]
-- **설명**: 프로젝트에 테스트 대상 사이트(도메인)를 등록하면 소유권 검증용 토큰과 검증 방식(DNS TXT / 파일)을 발급한다. 등록 직후 상태는 `pending`.
-- **수용 기준**:
-  - `POST /projects/:id/domains` → 201, 응답에 `verification.record_name/record_value`(dns_txt) 또는 `file_path/file_content`(file) 포함, `status=pending`.
-  - 동일 프로젝트에 동일 domain 재등록 시 409 `CONFLICT` (UNIQUE(project_id, domain)).
-  - method는 `dns_txt` | `file`만 허용, 그 외 422 `VALIDATION_ERROR`.
-- **데이터**: verified_domains(id, project_id, domain, method, token, status, verified_at)
-- **API**: GET/POST `/projects/:id/domains`, DELETE `/projects/:id/domains/:domainId`
+### A. 인증 (AUTH)
 
-### C2. 도메인 소유권 검증 실행 (선행 게이트) [SC-01] · MUST
-- **설명**: 발급 토큰을 대상 도메인에서 확인(DNS TXT `klaro-verify=<token>` 조회 또는 `https://<domain>/klaro-challenge.txt` == token)해 통과 시에만 `verified`로 전환. 부하 잡은 검증된 도메인에만 허용.
-- **수용 기준**:
-  - `POST /projects/:id/domains/:domainId/verify` 성공 → 200 `{status:"verified", verified_at}`.
-  - 토큰 불일치/미발견 → 422 `VALIDATION_ERROR` 및 상태 `pending` 유지(또는 `failed` 기록).
-  - 검증되지 않은 domain으로 부하 테스트 생성 시도 → 403 `DOMAIN_NOT_VERIFIED` (C6 참조).
-- **데이터**: verified_domains(status, verified_at)
-- **API**: POST `/projects/:id/domains/:domainId/verify`
+#### [AUTH-01] 회원가입 (이메일/비밀번호)
+- 설명: 신규 유저 생성. 최초 가입 시 기본 조직 자동 생성 및 `owner` 멤버십 부여 여부는 결정 필요(아래 D-6).
+- 관련 ID/근거: `03-api-spec.md:31`(`POST /auth/signup` public), `02-data-model.md:41-48`(users).
+- 수용 기준:
+  - `POST /v1/auth/signup {email, password}` → 201. 동일 email 재가입 시 `409 CONFLICT`.
+  - `password_hash`는 단방향 해시로만 저장(평문 금지). email은 `citext UNIQUE`로 대소문자 무시 유일성.
+  - 응답에 원문 비밀번호·해시 미포함.
+- 데이터 모델 참조: `users`(§DATA-01).
+- API 참조: `POST /auth/signup`.
 
-### C3. API 카탈로그 CRUD [CAT-01]
-- **설명**: 검증된(또는 등록된) 사이트별로 테스트 대상 API를 카탈로그로 등록·조회·수정·삭제. method/path/query/headers/body_template/expected_status/default_weight/tags 보유. 부하 테스트가 재사용.
-- **수용 기준**:
-  - `POST /projects/:id/domains/:domainId/endpoints` → 201, 응답에 endpoint id·method·path.
-  - 동일 사이트 내 (method, path) 중복 → 409 `CONFLICT` (UNIQUE(domain_id, method, path)).
-  - method는 GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS 열거값만 허용.
-  - `DELETE /endpoints/:id` 대상이 **진행 중(pending~running)** 부하 테스트 scenario.apis[]에 참조되면 409.
-- **데이터**: endpoints(id, domain_id, name, method, path, query, headers, body_template, expected_status, default_weight, tags)
-- **API**: GET/POST `/projects/:id/domains/:domainId/endpoints`, GET/PATCH/DELETE `/endpoints/:id`
+#### [AUTH-02] 로그인 — JWT Access/Refresh 발급
+- 설명: 자격 검증 후 Access/Refresh 토큰 발급.
+- 관련 ID/근거: `03-api-spec.md:32`, `00-tech-stack.md:47`("JWT(Access/Refresh)").
+- 수용 기준:
+  - `POST /v1/auth/login {email, password}` → 200 `{access_token, refresh_token, expires_in}`. 실패 시 `401 UNAUTHENTICATED`(계정 존재 여부 노출 금지).
+  - Access 토큰 클레임에 `user_id`(sub) 포함, org 스코프는 요청별 `X-Org-Id` + 멤버십 검증으로 결정(§RBAC-03).
+  - 토큰 서명 검증 실패/만료 시 `401`.
+- API 참조: `POST /auth/login`.
 
-### C4. API 카탈로그 일괄 import [CAT-01]
-- **설명**: OpenAPI 스펙 또는 브라우저 HAR로 다수 endpoint를 일괄 등록. 중복은 스킵.
-- **수용 기준**:
-  - `POST .../endpoints/import` → 200 `{imported:<n>, skipped_duplicates:<m>}`.
-  - `source`는 `openapi`|`har`. 중복(method+path)은 skip 카운트에 반영, 실패시 부분 성공 허용.
-- **데이터**: endpoints
-- **API**: POST `/projects/:id/domains/:domainId/endpoints/import`
-- **주의**: import 소스 포맷 상세(HAR 필드 매핑, spec_url vs 인라인)는 문서 근거 얕음 → 모호/모순 참조.
+#### [AUTH-03] 토큰 갱신
+- 관련 ID/근거: `03-api-spec.md:33`(`POST /auth/refresh` public).
+- 수용 기준:
+  - 유효 Refresh → 새 Access(및 회전 정책 시 새 Refresh) 발급. 무효/만료/폐기 Refresh → `401`.
+  - 로그아웃/폐기된 Refresh 재사용 차단 가능해야 함(폐기 목록 또는 회전 감지 — 방식은 결정 필요 D-2).
+- API 참조: `POST /auth/refresh`.
 
-### C5. 부하 테스트 생성 — 다중 API 가중치 혼합 [LG-04] [LG-01] [CAT-01] [SC-01] · MUST
-- **설명**: 검증된 사이트 1개에 등록된 여러 API를 하나의 시나리오에서 가중치(weight) 비율로 동시 실행. 총 VU/RPS를 API별 weight로 분배(예 60/30/10). 대안 mode `journey`(순차 여정 반복)는 선택형.
-- **수용 기준**:
-  - `POST /projects/:id/load-tests` → 202 `{id, status:"validating"}`(비동기).
-  - 요청 domain_id 미검증 → 403 `DOMAIN_NOT_VERIFIED`.
-  - scenario.apis[]의 endpoint 중 하나라도 해당 domain_id 소속이 아니면 → 422 `VALIDATION_ERROR` ("all endpoints must belong to domain_id").
-  - scenario 필수 필드: `mode`(weighted|journey), `vu`, `duration_sec`, `apis:[{endpoint_id, weight}]`. weighted 모드에서 apis 비어있으면 422.
-  - plan max_vu 초과 → 402 `QUOTA_EXCEEDED` (details.overage_billing 여부 포함) [BILL-02].
-- **데이터**: load_tests(project_id, domain_id, target_url, scenario{mode,vu,duration,ramp_up,thresholds,apis[]}, vu, duration_sec, status, region, created_by)
-- **API**: GET/POST `/projects/:id/load-tests`
+#### [AUTH-04] OAuth 소셜 로그인 (GitHub/Google)
+- 설명: OAuth2 authorization code 흐름. 신규면 유저 생성(`oauth_provider`/`oauth_sub`), 기존이면 로그인.
+- 관련 ID/근거: `03-api-spec.md:34`(`GET /auth/oauth/:provider`), `02-data-model.md:47`, `00-tech-stack.md:47`.
+- 수용 기준:
+  - `GET /v1/auth/oauth/:provider`(github|google) 개시 → 콜백에서 프로파일 획득 → 유저 매칭/생성 후 AUTH-02와 동일 토큰 발급.
+  - OAuth 전용 유저는 `password_hash` NULL 허용(`02-data-model.md:46`).
+  - 동일 email이 비밀번호 계정으로 이미 있을 때의 병합/충돌 처리는 결정 필요(D-4).
+  - 개발 단계 무비용 원칙상 실제 OAuth 앱 크리덴셜 없이도 동작하는 dev/mock 경로 필요 여부는 결정 필요(D-3).
+- API 참조: `GET /auth/oauth/:provider`.
 
-### C6. 부하 테스트 상태머신 (잡 생명주기) [LG-01] · MUST
-- **설명**: 잡은 정의된 상태 전이만 따른다: `PENDING → VALIDATING → QUEUED → PROVISIONING → RUNNING → AGGREGATING → COMPLETED`, 분기 `REJECTED`(검증/쿼터 실패), `FAILED`, `ABORTED`(서킷 브레이커/스트림 단절 안전종료). VALIDATING에서 도메인·쿼터 확인, PROVISIONING에서 워커(컨테이너/K8s Job) 준비.
-- **수용 기준**:
-  - `GET /load-tests/:id` → 현재 `status`, `progress{elapsed_sec, current_vu}`, `aborted_reason` 반환.
-  - 정의되지 않은 상태 전이는 거부(불변식): 예 COMPLETED→RUNNING 불가.
-  - 도메인 미검증/쿼터 실패는 REJECTED로 종결(RUNNING 진입 금지).
-  - status 열거값은 데이터 모델의 10개(pending~rejected)와 일치.
-- **데이터**: load_tests(status, started_at, finished_at, aborted_reason)
-- **API**: GET `/load-tests/:id`
+#### [AUTH-05] API Key 인증 (CI/CLI)
+- 설명: `Authorization: Bearer <API_KEY>`로 org 스코프 인증. JWT와 동일 미들웨어에서 분기.
+- 관련 ID/근거: `03-api-spec.md:15`, `02-data-model.md:59-66`(api_keys), `03-api-spec.md:42-44`.
+- 수용 기준:
+  - API Key는 `key_hash`로만 저장, 발급 응답에서만 원문 1회 노출. `expires_at`/`revoked_at` 경과 시 `401`.
+  - API Key 인증은 발급 org에 고정 스코프. 인증 시 `last_used_at` 갱신.
+  - API Key 요청은 유저 대화형 전용 엔드포인트(예: 멤버 초대)와 권한 구분 가능해야 함(범위는 D-7).
+- 데이터 모델 참조: `api_keys`(§DATA-03).
+- API 참조: `GET/POST/DELETE /orgs/:orgId/api-keys`.
 
-### C7. k6 워커 — 가중치 혼합 트래픽 실행 [LG-04] [LG-01] · MUST
-- **설명**: RUNNING 진입 시 워커(로컬=Docker 컨테이너 spawn, 프로덕션=K8s Job — **인터페이스로 추상화**)를 생성해 k6 시나리오 실행. weight 기반 확률로 매 요청 대상 API 선택, endpoint 정의(headers/body/query)를 주입. 메트릭은 **API 단위 태깅**으로 집계. 잡 종료(정상/중단) 시 워커 즉시 회수(**idle 워커 0**).
-- **수용 기준**:
-  - 실행 트래픽이 지정 weight 비율에 근사(허용 오차 내)하게 API별로 분배됨(메트릭 태그로 검증 가능).
-  - endpoint의 method/path/headers/body_template가 실제 요청에 반영.
-  - 잡 종료 후 워커 리소스가 남지 않음(컨테이너/Job 삭제 확인). 오케스트레이터 호출은 spawn/abort/cleanup 인터페이스 뒤에 있어 Docker↔K8s 교체 가능.
-- **데이터**: load_tests(scenario.apis[]), endpoints
-- **API(내부)**: gRPC WorkerControl.DispatchJob / AbortJob / StreamMetrics / Heartbeat (전 구간 mTLS)
-
-### C8. 서킷 브레이커 [LG-03] · MUST (Critical)
-- **설명**: 워커 사이드카가 슬라이딩 윈도(예 10초)로 5xx 비율·에러율 계산. **에러율 > 80%** 또는 대상 `503` 지속 시 Control Plane에 abort 신호 → 전 워커 즉시 부하 중단. 상태 `ABORTED` 기록 + 사용자 알림(개발: MailHog / Slack 스텁) + **부분 결과 보존**.
-- **수용 기준**:
-  - 에러율 임계 초과 감지 시 잡이 ABORTED로 전이하고 `aborted_reason`에 사유 기록(예 "error_rate > 0.8").
-  - abort 시 모든 활성 워커가 부하를 멈춤(idle=0 회수 포함).
-  - 중단 시점까지 수집된 결과(load_test_results)는 삭제되지 않고 보존.
-  - WS 스트림으로 `{event:"aborted", reason, at}` 이벤트 발행.
-- **데이터**: load_tests(status=aborted, aborted_reason)
-- **API**: WS `/load-tests/:id/stream`; 내부 gRPC AbortJob
-
-### C9. 부하 테스트 강제 중단(사용자) [LG-01]
-- **설명**: 사용자가 진행 중 테스트를 안전 종료.
-- **수용 기준**:
-  - `POST /load-tests/:id/abort` → 잡을 ABORTED로 전이, 워커 회수, 부분 결과 보존.
-  - 이미 종료(completed/failed/aborted/rejected)된 잡에 대한 abort → 409 `CONFLICT`.
-- **데이터**: load_tests(status, aborted_reason)
-- **API**: POST `/load-tests/:id/abort`
-
-### C10. 실시간 메트릭 WebSocket 스트림 [LG-02] · MUST
-- **설명**: RUNNING 동안 워커 집계 메트릭을 Control Plane WS로 구독자에게 push(≤2초 주기). 서킷 브레이커 발동 이벤트도 동일 채널로 전달.
-- **수용 기준**:
-  - `WS /load-tests/:id/stream` 접속 시 주기 메시지 `{ts, rps, latency_p95_ms, error_rate, active_vu}` 수신(주기 ≤2초).
-  - abort 발생 시 `{event:"aborted", reason, at}` 메시지 1회 전달 후 스트림 종료.
-  - 테넌트 스코프 밖 load_test id 구독 시도 → 인가 거부(FORBIDDEN/NOT_FOUND).
-- **데이터**: 시계열 원본은 TSDB, RDB 미저장(불변식). load_test_id로 상관.
-- **API**: WS `/load-tests/:id/stream`
-
-### C11. 요약 결과 조회 — API별 분해 [LG-04] [LG-01]
-- **설명**: AGGREGATING 후 결과를 **API별 1행 + 전체 집계 1행**으로 저장하고 per_api 분해와 전체 요약을 반환. 병목 API 식별 포함.
-- **수용 기준**:
-  - `GET /load-tests/:id/results` → 전체 `rps_avg, latency{p50,p95,p99}, error_rate, max_vu_before_degradation, bottleneck_endpoint` + `per_api[]`(endpoint_id, method, path, weight, rps_avg, latency_p95_ms, error_rate).
-  - load_test_results에 endpoint_id별 행 + endpoint_id NULL(전체 집계) 행이 존재.
-  - 완료 전 조회 시 결과 미완 상태를 명확히(빈/부분 또는 상태 안내).
-- **데이터**: load_test_results(load_test_id, endpoint_id[NULL=전체], rps_avg, latency_p50/p95/p99, error_rate, max_vu_before_degradation, bottleneck_endpoint, metrics_ref)
-- **API**: GET `/load-tests/:id/results`
-
-### C12. 시계열 메트릭 조회 [LG-02]
-- **설명**: 완료/진행 테스트의 시계열 메트릭을 TSDB에서 조회(요약과 별개, RDB에는 참조 키만).
-- **수용 기준**:
-  - `GET /load-tests/:id/metrics` → 시계열 포인트 반환. 원본은 TSDB, RDB의 `metrics_ref` 키로 조회.
-  - 시계열 데이터가 RDB(load_test_results 등)에 원본 저장되지 않음(불변식).
-- **데이터**: load_test_results.metrics_ref (TSDB 쿼리 키)
-- **API**: GET `/load-tests/:id/metrics`
-
-### C13. VU-Minutes usage 이벤트 발행 지점 [BILL-01] [BILL-02] (발행만, 계산 상세 제외)
-- **설명**: 잡 완료 흐름에서 usage 이벤트(VU-Minutes = VU × 분)를 발행하는 **훅 지점**을 명시. 초과분(overage)·금액 계산·Stripe 연동은 본 세션 제외.
-- **수용 기준**:
-  - 잡이 COMPLETED/ABORTED로 종결될 때 usage 이벤트가 발행되어야 함(발행 지점 존재).
-  - 이벤트 payload에 org_id, load_test_id, vu_minutes 산정 근거 포함.
-  - overage/amount 계산 로직은 Billing 서비스 책임(본 계약 미포함).
-- **데이터**: usage_records(org_id, load_test_id, vu_minutes, overage_vu_minutes, amount_cents) — 계량 발행 지점만
-- **API**: (참고) GET `/orgs/:orgId/usage` — 본 세션 미구현, 발행 지점만 표시
+#### [AUTH-06] 통합 인증 미들웨어 — dev-token 스텁 대체 (MUST)
+- 설명: `authStub`를 JWT/API Key 검증 미들웨어로 교체. 검증 성공 시 `user_id` + 확정 `org_id`(+ 역할)를 컨텍스트에 주입하고, 후속 DB 접근 전 세션 org 스코프를 설정(§TENANT-03).
+- 관련 ID/근거: `internal/api/middleware.go:14-25`, `internal/api/router.go:44`(`authStub(d.DevToken)`), `CLAUDE.md`("dev-token 스텁 대체").
+- 수용 기준:
+  - 기존 `c.Set("project_id", devProjectID)` 고정 주입(`middleware.go:22`) 제거. 컨텍스트는 `user_id`+`org_id`(+role) 기준으로 재구성.
+  - 토큰/키 없음·무효 → `401 UNAUTHENTICATED`(기존 에러 포맷 `errors.go` 유지).
+  - dev 환경 편의를 위한 dev-token 경로 유지 여부는 결정 필요(D-1); 유지하더라도 반드시 실제 user/org/membership에 매핑되어야 하며 고정 project 직접 주입은 금지.
 
 ---
 
-## 불변식 체크리스트 (MUST)
+### B. 인가 / RBAC (RBAC)
 
-- **RLS 멀티테넌시**: verified_domains/endpoints/load_tests/load_test_results/usage_records 등 org_id 스코프 테이블 전체에 RLS 정책, 요청마다 `SET app.current_org = <uuid>`. 크로스테넌트 접근 불가. (02 §3, 01 §3)
-- **도메인 소유권 게이트 [SC-01]**: 부하 잡은 `verified` 도메인에만 생성 허용. 미검증 → 403/REJECTED. (01 §2.3, 03 §3.2)
-- **endpoint↔domain 소속 검증**: scenario.apis[]의 모든 endpoint가 domain_id 소속이어야 함. 위반 422.
-- **잡 상태머신**: 정의된 전이만 허용. REJECTED/FAILED/ABORTED 분기 준수. (01 §2.1)
-- **서킷 브레이커 [LG-03]**: 에러율>80%/503 지속 시 전 워커 즉시 중단 + ABORTED + 부분 결과 보존. (01 §2.3)
-- **워커 idle = 0**: 잡 종료 시 컨테이너/K8s Job 즉시 회수(finalizer 보장). (01 §2.2)
-- **시계열 RDB 분리**: 메트릭 원본은 TSDB, RDB에는 참조 키(metrics_ref)만. (02 서두, §2.5)
-- **내부 mTLS**: Control Plane ↔ Worker gRPC 전 구간 mTLS. (01 §1, 03 §5)
-- **오케스트레이션 추상화**: 워커 spawn/abort/cleanup을 인터페이스로 분리(Docker Compose ↔ K8s Job 교체 가능). (본 세션 확정 스택)
-- **감사 로그**: load_test.create/abort 등 잡 이벤트 audit_logs 기록(SOC2 대비). (01 §4, 02 §2.8)
+#### [RBAC-01] 역할 계층 및 서열 (MUST)
+- 설명: 역할 `owner > admin > member > viewer` 서열 정의. 상위는 하위 권한 포함.
+- 관련 ID/근거: `01-technical-design.md:70`, `02-data-model.md:56`(memberships.role enum).
+- 수용 기준: `memberships.role` enum = `(owner, admin, member, viewer)`. 권한 판정은 "요구 최소 역할 이상"으로 평가.
+
+#### [RBAC-02] 권한 매트릭스 (Phase 1 엔드포인트, MUST)
+- 근거: `03-api-spec.md:36-49`, `:83-85`의 "권한" 열. 접근 등급 정의: `public`(비인증) < `user`(임의 인증 유저, org 무관) < `viewer` < `member` < `admin` < `owner`.
+
+| 엔드포인트 | 최소 권한 | 근거 |
+|-----------|-----------|------|
+| POST `/auth/*` (signup/login/refresh/oauth) | public | `03-api-spec.md:31-34` |
+| POST `/orgs` (조직 생성) | user | `03-api-spec.md:37` |
+| GET `/orgs` (내 조직 목록) | member | `03-api-spec.md:36` |
+| GET `/orgs/:orgId/members` | member | `03-api-spec.md:38` |
+| POST `/orgs/:orgId/members` (초대) | admin | `03-api-spec.md:39` |
+| PATCH `/orgs/:orgId/members/:userId` (역할 변경) | admin | `03-api-spec.md:40` |
+| DELETE `/orgs/:orgId/members/:userId` | admin | `03-api-spec.md:41` |
+| GET/POST `/orgs/:orgId/api-keys` | admin | `03-api-spec.md:42-43` |
+| DELETE `/orgs/:orgId/api-keys/:id` | admin | `03-api-spec.md:44` |
+| GET/POST `/projects` | member | `03-api-spec.md:45-46` |
+| GET/PATCH `/projects/:id` | member | `03-api-spec.md:47-48` |
+| DELETE `/projects/:id` | admin | `03-api-spec.md:49` |
+| POST `/orgs/:orgId/subscription` (플랜 변경, 참고) | owner | `03-api-spec.md:84` |
+| GET `/orgs/:orgId/subscription`·`/usage` (참고) | admin | `03-api-spec.md:83,85` |
+
+- 수용 기준:
+  - 권한 미달 요청은 `403 FORBIDDEN`(`03-api-spec.md:23`). 미인증은 `401`.
+  - `viewer`는 명시적 매트릭스에 없음 → 읽기(GET) 전용으로 취급, 쓰기(POST/PATCH/DELETE) 불가. (해석 근거 부재 — D-5 참조)
+  - 역할 변경 시 마지막 `owner` 강등/제거 방지(조직에 owner 0명 금지). 문서 미규정이나 무결성 필수로 못 박음 → D-6.
+
+#### [RBAC-03] org 스코프 해석 (MUST)
+- 설명: 유저는 여러 org에 소속 가능(`02-data-model.md:21` N:M). 요청별로 활성 org를 확정.
+- 관련 ID/근거: `03-api-spec.md:16`("헤더 `X-Org-Id` 또는 경로로 스코프"), `02-data-model.md:50-57`.
+- 수용 기준:
+  - 경로에 `:orgId`가 있으면 그 값, 없으면 `X-Org-Id` 헤더로 org 확정.
+  - 확정 org에 대한 유저 멤버십이 없으면 `403`(존재 자체 은닉이면 `404`도 허용 — D-8).
+  - 확정 org의 `id`가 이후 DB 세션 스코프(§TENANT-03)에 사용됨.
+
+#### [RBAC-04] Project 하위 스코프 (MUST)
+- 설명: `:id`(project) 대상 요청은 해당 project가 활성 org 소속인지 검증 후 처리.
+- 관련 ID/근거: `01-technical-design.md:70`(`Org > Project > Resource`).
+- 수용 기준: project가 활성 org 소속이 아니면 RLS로 조회 0건 → `404 NOT_FOUND`. 경로 리소스(load-test/scan/report 등)도 org 스코프 밖이면 `404`(현재 `GetLoadTest` id-only 조회의 IDOR를 RLS가 차단).
+
+---
+
+### C. 멀티테넌시 RLS (TENANT)
+
+#### [TENANT-01] org 스코프 테이블에 `org_id` 보강 (MUST)
+- 설명: 아래 테이블은 현재 `project_id`만 보유 → RLS 정책 대상이 되도록 `org_id`를 도입한다.
+- 관련 ID/근거: `02-data-model.md:272`, `CLAUDE.md` 불변식("org_id를 가진 모든 테이블에 RLS").
+
+RLS 격차표 (실제 마이그레이션 기준):
+
+| 테이블 | 현재 org_id | 근거(file:line) | 조치 |
+|--------|-------------|-----------------|------|
+| organizations | (자체가 테넌트 루트, `id`가 스코프 키) | `0001_init.sql:3-7` | RLS: `id = current_org` |
+| projects | 있음 | `0001_init.sql:9-14` | RLS 대상 |
+| verified_domains | 없음 | `0001_init.sql:16-25` | org_id 추가 |
+| load_tests | 없음 | `0001_init.sql:27-39` | org_id 추가 |
+| load_test_results | 없음(load_test 경유) | `0001_init.sql:42-55` | org_id 추가 또는 조인 정책 — D-9 |
+| scans | 없음 | `0002_scans.sql:2-14` | org_id 추가 |
+| scan_findings | 없음(scan 경유) | `0002_scans.sql:17-29` | org_id 추가 또는 조인 정책 — D-9 |
+| apm_agents | 없음 | `0003_apm_reports.sql:5-13` | org_id 추가 |
+| apm_spans | 없음 | `0003_apm_reports.sql:15-27` | org_id 추가 |
+| apm_logs | 없음 | `0003_apm_reports.sql:31-38` | org_id 추가 |
+| reports | 없음 | `0003_apm_reports.sql:42-53` | org_id 추가 |
+| report_shares | 없음(report 경유; public 조회는 slug) | `0003_apm_reports.sql:56-64` | org_id 추가 또는 조인 정책 — D-9 |
+| users | (전역, org 비귀속) | `02-data-model.md:41` | RLS 비대상 |
+| memberships | org_id 보유(신설) | `02-data-model.md:50-57` | RLS 대상 |
+| api_keys | org_id 보유(신설) | `02-data-model.md:59-66` | RLS 대상 |
+
+- 수용 기준:
+  - 위 org 스코프 테이블 전부에 `org_id uuid NOT NULL` 존재(직접 컬럼 또는 상위 조인). 신규 마이그레이션(`0004_*` 이상)으로 추가하고 기존 시드 데이터 백필.
+  - 데이터 모델 문서(`02-data-model.md`)와 실제 스키마의 일치. (문서에는 이들 테이블에 org_id가 명시되지 않았고 §3만 "org_id 가진 모든 테이블"이라 기술 → 문서-스키마 모순, `## 모호/모순` M-1 참조.)
+
+#### [TENANT-02] Row-Level Security 정책 (MUST)
+- 설명: org 스코프 전 테이블에 RLS 활성 + 정책 생성.
+- 관련 ID/근거: `02-data-model.md:272`, `01-technical-design.md:133`.
+- 수용 기준:
+  - 각 대상 테이블 `ENABLE ROW LEVEL SECURITY` + `FORCE ROW LEVEL SECURITY`(테이블 소유자도 우회 금지).
+  - `USING (org_id = current_setting('app.current_org')::uuid)` 및 INSERT `WITH CHECK` 동일 조건.
+  - 세션 변수 미설정 상태에서 org 스코프 테이블 SELECT는 0건(정보 누출 방지).
+  - RLS 우회가 필요한 인증 전 경로(로그인 시 users 조회, `GET /shared/:slug` 공유 리포트 `router.go:42`, APM ingest `router.go:40`)의 처리 규칙 명시 필요 — D-10.
+
+#### [TENANT-03] 세션 org 스코프 강제 — store org 컨텍스트 (MUST)
+- 설명: 인증 미들웨어 확정 org를 DB 커넥션 세션 변수 `app.current_org`로 설정해야 RLS가 작동. 현재 store는 공유 `pgxpool`을 직접 사용하며 세션 변수 설정 지점이 없음(`store.go:19-29`, 각 메서드 `s.pool.QueryRow/Exec`).
+- 관련 ID/근거: `store.go` 전반, `CLAUDE.md`("SET app.current_org = <uuid>로 스코프 강제").
+- 수용 기준:
+  - 모든 org 스코프 쿼리는 `app.current_org`가 설정된 커넥션에서 실행됨이 보장(pool 커넥션 재사용에도 누출 없음).
+  - 요청 종료 시 세션 변수가 다음 요청에 승계되지 않음(트랜잭션 `SET LOCAL` 또는 커넥션 획득/리셋 — 방식은 architect 결정 D-11).
+  - store 시그니처는 org 컨텍스트(또는 org 바인딩 실행자)를 받도록 변경. 미들웨어→핸들러→store로 org 전달 경로 확립.
+  - 회귀: 기존 `services/load-test` 테스트(`store_test.go` 등)가 RLS/org 컨텍스트 반영해 통과.
+
+#### [TENANT-04] dev 시드 정합 (MUST)
+- 설명: RLS 활성 후에도 기존 dev org/project 흐름이 동작하도록 dev user + membership 시드.
+- 관련 ID/근거: `0001_init.sql:57-62`(org/project 시드만 존재, user/membership 없음).
+- 수용 기준: dev org(`...0001`)에 dev user + `owner` membership 시드. dev-token 경로 유지 시(D-1) 이 user/org로 매핑.
+
+---
+
+### D. 데이터 모델 (DATA)
+
+#### [DATA-01] users 테이블
+- 근거: `02-data-model.md:41-48`.
+- 수용 기준: `id uuid PK`, `email citext UNIQUE`, `password_hash text NULL`, `oauth_provider text NULL`, `oauth_sub text NULL`, `created_at`. `citext` 확장 활성. (`name` 컬럼은 문서에 없음 — 필요 시 D-12.) `(oauth_provider, oauth_sub)` 유일성 인덱스 필요 여부 D-12.
+
+#### [DATA-02] memberships 테이블
+- 근거: `02-data-model.md:50-57`.
+- 수용 기준: `id uuid PK`, `org_id FK`, `user_id FK`, `role enum(owner,admin,member,viewer)`, `UNIQUE(org_id, user_id)`. 인덱스: `(user_id)`(내 org 목록 조회), `(org_id)`.
+
+#### [DATA-03] api_keys 테이블
+- 근거: `02-data-model.md:59-66`.
+- 수용 기준: `id uuid PK`, `org_id FK`, `key_hash text`, `name text`, `last_used_at/expires_at/revoked_at timestamptz NULL`. `key_hash` 조회용 인덱스.
+
+> `github_installations`(`02-data-model.md:68-75`)는 Phase 1 제외(§범위).
+
+---
+
+## 불변식 체크리스트 (Phase 1 관련, MUST)
+
+- [ ] **RLS 멀티테넌시**: org 스코프 전 테이블 RLS + `app.current_org` 세션 강제(TENANT-02, TENANT-03). 세션 미설정 시 0건.
+- [ ] **테넌트 크로스 차단**: id-only 조회(`store.go:43`,`159` 등)가 RLS로 차단되어 크로스테넌트 읽기 불가(RBAC-04).
+- [ ] **dev-token 스텁 제거**: 고정 project 주입(`middleware.go:22`) 폐기, 실제 인증으로 대체(AUTH-06).
+- [ ] **최소 권한**: 권한 매트릭스 위반 시 403/401(RBAC-02).
+- [ ] **비밀정보 비노출**: password/API key 원문·해시 미노출, 실패 응답 계정 은닉(AUTH-01,02,05).
+- [ ] **비용 정책**: 유료 외부 서비스 신규 추가 금지([COST-05]). OAuth/JWT 라이브러리는 OSS·무비용. (Bedrock 무관)
+- [ ] 도메인 소유권 게이트·서킷 브레이커·Ephemeral·워커 idle=0·mTLS·시계열 RDB 분리 = Phase 1 직접 대상 아님(기존 유지, 위반 도입 금지).
 
 ---
 
 ## architect 결정 필요 목록
 
-확정 스택(Go, Docker Compose, RLS)은 제외. 아래는 S1 범위에 걸린 미확정 설계 결정.
+> 문서에 근거 없음 → architect가 결정하거나 사용자에게 확인. backend-builder는 이 결정 전 스택 특정 코드 착수 금지.
 
-1. **잡 큐 기술**: NATS vs Kafka (01 §1 "NATS/Kafka" 병기). 로컬 개발용 큐 선택 + gRPC 디스패치와의 역할 분담.
-2. **로드 워커 시계열 TSDB**: VictoriaMetrics 확정 여부 및 metrics_ref 키 스키마. (01 다이어그램은 VictoriaMetrics, 02는 "별도 저장소"로 일반화)
-3. **워커 메트릭 역류 경로**: gRPC StreamMetrics vs OTLP vs WS — 로드 워커 메트릭이 Control Plane WS까지 오는 경로 확정(01 §1은 "WS/OTLP" 병기).
-4. **서킷 브레이커 파라미터 확정**: 슬라이딩 윈도 길이(문서 "예: 10초"), 에러율 임계(80% 확정), 503 "지속" 판정 기준.
-5. **k6 시나리오 표현**: k6 JS 직접 vs 선언형 JSON/YAML→k6 변환 (01 §2.2 둘 다 언급). weighted↔journey 실행기 구현 방식.
-6. **weight 분배 정밀도**: VU/RPS를 weight로 나눌 때 라운딩·최소 VU 보장 규칙(수용 오차 정의).
-7. **VU-Minutes 산정 규칙**: 램프업 구간·중단(ABORTED) 시 부분 VU-Minutes 계산 방식(Billing과 경계).
-8. **알림 채널 스텁 범위**: 개발 MailHog + Slack 스텁의 트리거·페이로드 최소 계약.
-9. **워커 격리(로컬)**: K8s 네임스페이스/NetworkPolicy(01 §3) 대응하는 Docker Compose 격리 수준.
+- **D-1 dev-token 경로 유지 여부**: 프로덕션 인증 도입 후에도 dev 편의용 dev-token을 남길지, 남긴다면 실제 user/org 매핑 방식.
+- **D-2 Refresh 토큰 저장·회전 전략**: 무상태 JWT vs Redis(`00-tech-stack.md:27` 세션 캐시) 저장 폐기목록/회전 감지. 로그아웃 처리.
+- **D-3 OAuth dev 모드**: 실제 GitHub/Google 앱 크리덴셜 없이 개발할 mock 경로 필요 여부(무비용 원칙과 연계).
+- **D-4 OAuth·비밀번호 계정 병합**: 동일 email 충돌 시 병합/거부 정책.
+- **D-5 viewer 권한 세분화**: 문서가 endpoint별 viewer를 규정하지 않음(매트릭스 전부 member 이상). viewer=읽기전용 가정 확정 여부.
+- **D-6 회원가입 시 기본 org 자동 생성 + owner 부여** 여부, 및 "org에 owner 최소 1명" 무결성 강제 지점.
+- **D-7 API Key 권한 등급**: API Key가 어떤 역할/스코프로 매핑되는지(예: member 상당? org 전체?).
+- **D-8 org 미소속 접근 응답**: 403 vs 404(존재 은닉) 정책.
+- **D-9 조인 리소스 org_id 전략**: `load_test_results`/`scan_findings`/`report_shares` 등 자식 테이블에 org_id 비정규화 컬럼을 둘지, 부모 조인 기반 RLS 정책을 쓸지.
+- **D-10 RLS 우회 경로**: 로그인 전 users 조회, `GET /shared/:slug`(`router.go:42`) public 조회, APM ingest(`router.go:40`, X-Ingest-Token)에서 RLS를 어떻게 처리(BYPASSRLS 롤 vs 별도 커넥션 vs 정책 예외).
+- **D-11 RLS 세션 설정 메커니즘(pgxpool)**: 요청당 트랜잭션 `SET LOCAL app.current_org` vs 커넥션 acquire+set+reset. 성능/누출 트레이드오프.
+- **D-12 users 부가 컬럼**: `name`/`updated_at`/`(oauth_provider,oauth_sub)` 유일 인덱스 필요 여부(문서 미명시).
+- (참고) 잔여 전역 스택 결정(`00-tech-stack.md:119-125`): 로컬 오케스트레이션, 큐(NATS vs Kafka), Bedrock 모델 — Phase 1 직접 영향 낮으나 미확정.
 
 ---
 
-## 모호/모순
+## 모호 / 모순
 
-1. **LG-01 / LG-02 미정의**: 사용자 요청은 [LG-01~04]를 참조하나 docs에는 LG-03(서킷 브레이커)·LG-04(다중 API)만 명시 번호가 있다. LG-01(부하 생명주기·실행)·LG-02(실시간 메트릭)는 본 계약이 편의상 부여한 추적 ID이며, 정식 요구 번호 확정 필요.
-2. **도메인 등록 권한**: 03 §2 표는 도메인 등록/검증을 `member` 권한으로 표기하나, [SC-01] DDoS 게이트 성격상 admin 이상 필요 여부는 미기재. (권한 정책 확인 필요)
-3. **verify 실패 상태**: 데이터 모델 status에 `failed`가 있으나, 03 §3.1 예시는 실패 시 422만 반환하고 상태 전이를 명시하지 않음(pending 유지 vs failed 전환 불명확).
-4. **import 포맷 상세**: 03 §3.6은 openapi spec_url 예시만 제시. HAR 소스의 필드 매핑·인라인 spec 지원·인증 필요 스펙 접근 방식은 근거 부족.
-5. **journey 모드 결과 구조**: [LG-04] journey(순차 여정) 모드의 결과가 per_api[] 분해와 어떻게 매핑되는지(스텝별 vs 여정 전체) 문서 근거 없음.
-6. **target_url vs domain**: load_tests에 domain_id와 target_url이 병존. target_url을 클라이언트가 보내는지 domain에서 파생하는지(스킴 결정 포함) 불명확 — 03 §3.2 요청 예시엔 target_url 없음(domain_id만).
-7. **쿼터 초과 동작 분기**: 402 QUOTA_EXCEEDED와 "overage_billing 허용 시 진행"의 관계 — 초과를 허용하고 진행할지, 항상 차단할지 정책 결정 필요(05 §쿼터 초과는 "초과 과금/업그레이드 선택" 모달 언급).
-8. **max_vu_before_degradation 산정 주체**: 결과 필드는 "AI 한계점 도출 근거"라 되어 있어 S4/AI 의존 가능성. S1 워커가 직접 산출하는지 리포트 단계 산출인지 경계 불명확.
+- **M-1 문서-스키마 모순(org_id)**: `02-data-model.md`의 개별 테이블 정의(§2.3~2.6)는 `verified_domains`/`load_tests`/`scans`/`apm_*`/`reports` 등에 `project_id`만 명시하고 `org_id` 컬럼을 두지 않는다. 그러나 §3(`:272`)과 `CLAUDE.md` 불변식은 "org_id 가진 모든 테이블에 RLS"라 규정한다. → RLS를 project-only 테이블에 적용하려면 org_id 비정규화가 필요(D-9). 문서 기준(불변식 우선)으로 org_id 보강을 계약화했으나, 데이터 모델 문서도 함께 갱신되어야 링크 그래프 정합.
+- **M-2 초대(invitation) 흐름 불명**: `POST /orgs/:orgId/members`(`03-api-spec.md:39`)는 "멤버 초대"지만, 미가입(user 미존재) 대상 초대를 위한 `invitations` 테이블/토큰·수락 흐름이 데이터 모델에 없다. 기존 user만 email로 즉시 membership 추가하는지, pending 초대를 지원하는지 불명 → 결정 필요(사실상 D-6과 연계).
+- **M-3 org별 default project**: dev 시드는 org 1개 = project 1개지만, 신규 org 생성 시 default project 자동 생성 여부 문서에 없음.
+- **M-4 SAML/`saml/acs`**: 문서에 public으로 존재(`03-api-spec.md:35`)하나 M3 표기 → Phase 1 제외로 처리. 상충 아님, 범위 처리로 기록.

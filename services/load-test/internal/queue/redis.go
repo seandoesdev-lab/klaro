@@ -19,6 +19,10 @@ func NewRedis(addr string) *Redis {
 	return &Redis{c: redis.NewClient(&redis.Options{Addr: addr})}
 }
 
+// Client exposes the underlying redis client so the auth refresh store can reuse
+// the same connection (설계 §1.1: 신규 유료 의존 0).
+func (r *Redis) Client() *redis.Client { return r.c }
+
 func (r *Redis) Enqueue(ctx context.Context, j model.Job) error {
 	b, err := json.Marshal(j)
 	if err != nil {

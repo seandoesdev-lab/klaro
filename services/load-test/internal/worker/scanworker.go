@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/klaro/load-test/internal/model"
 	"github.com/klaro/load-test/internal/queue"
 	"github.com/klaro/load-test/internal/store"
@@ -48,7 +50,13 @@ func RunScan(ctx context.Context, d ScanDeps) {
 
 func (d ScanDeps) processScan(ctx context.Context, job model.ScanJob) error {
 	id := job.ScanID
-	if err := d.Store.UpdateScanStatus(ctx, id, model.ScanStatusRunning, nil); err != nil {
+	// org 스코프 실행 헬퍼(설계 §6.4): 각 DB write 를 RLS 관통 org tx 로 감싼다.
+	setStatus := func(to model.ScanStatus, score *int) error {
+		return d.Store.RunInOrg(ctx, job.OrgID, func(tx pgx.Tx) error {
+			return d.Store.UpdateScanStatus(ctx, tx, id, to, score)
+		})
+	}
+	if err := setStatus(model.ScanStatusRunning, nil); err != nil {
 		return err
 	}
 
@@ -57,26 +65,28 @@ func (d ScanDeps) processScan(ctx context.Context, job model.ScanJob) error {
 	case model.ScanTypeDAST:
 		fs, err := d.runDAST(ctx, job.TargetURL)
 		if err != nil {
-			_ = d.Store.UpdateScanStatus(ctx, id, model.ScanStatusFailed, nil)
+			_ = setStatus(model.ScanStatusFailed, nil)
 			return err
 		}
 		findings = fs
 	case model.ScanTypeSAST:
 		findings = stubSAST(job.TargetURL)
 	default:
-		_ = d.Store.UpdateScanStatus(ctx, id, model.ScanStatusFailed, nil)
+		_ = setStatus(model.ScanStatusFailed, nil)
 		return nil
 	}
 
 	for i := range findings {
 		findings[i].ScanID = id
 	}
-	if err := d.Store.SaveFindings(ctx, findings); err != nil {
-		_ = d.Store.UpdateScanStatus(ctx, id, model.ScanStatusFailed, nil)
+	if err := d.Store.RunInOrg(ctx, job.OrgID, func(tx pgx.Tx) error {
+		return d.Store.SaveFindings(ctx, tx, findings)
+	}); err != nil {
+		_ = setStatus(model.ScanStatusFailed, nil)
 		return err
 	}
 	score := model.ComputeScore(findings)
-	return d.Store.UpdateScanStatus(ctx, id, model.ScanStatusCompleted, &score)
+	return setStatus(model.ScanStatusCompleted, &score)
 }
 
 // runDAST fetches the target and analyzes response headers. The pure analysis

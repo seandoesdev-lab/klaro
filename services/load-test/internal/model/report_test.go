@@ -8,9 +8,9 @@ import (
 
 func TestComputePerformanceScore(t *testing.T) {
 	cases := []struct {
-		name         string
-		in           PerfInput
-		min, max     int
+		name     string
+		in       PerfInput
+		min, max int
 	}{
 		{"no data", PerfInput{HasData: false}, 0, 0},
 		{"healthy", PerfInput{HasData: true, LatencyP95: 120, ErrorRate: 0}, 100, 100},

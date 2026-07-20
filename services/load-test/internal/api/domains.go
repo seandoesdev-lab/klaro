@@ -10,6 +10,7 @@ import (
 
 	"github.com/klaro/load-test/internal/model"
 	"github.com/klaro/load-test/internal/store"
+	"github.com/klaro/load-test/internal/tenancy"
 )
 
 func randToken() string {
@@ -34,8 +35,8 @@ func (d Deps) createDomain(c *gin.Context) {
 	dom := &model.VerifiedDomain{
 		ProjectID: projectID(c), Domain: req.Domain, Method: req.Method, Token: randToken(),
 	}
-	if err := d.Store.CreateDomain(c, dom); err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+	if err := d.Store.CreateDomain(c, tenancy.Tx(c), dom); err != nil {
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{
@@ -50,22 +51,22 @@ func (d Deps) createDomain(c *gin.Context) {
 }
 
 func (d Deps) listDomains(c *gin.Context) {
-	items, err := d.Store.ListDomains(c, projectID(c))
+	items, err := d.Store.ListDomains(c, tenancy.Tx(c), projectID(c))
 	if err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": items})
 }
 
 func (d Deps) verifyDomain(c *gin.Context) {
-	dom, err := d.Store.GetDomain(c, c.Param("domainId"))
+	dom, err := d.Store.GetDomain(c, tenancy.Tx(c), c.Param("domainId"))
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(c, 404, "NOT_FOUND", "domain not found", nil)
 		return
 	}
 	if err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 	ok, verr := d.Verifier.Verify(c, dom.Domain, dom.Method, dom.Token)
@@ -77,8 +78,8 @@ func (d Deps) verifyDomain(c *gin.Context) {
 		writeError(c, 422, "VALIDATION_ERROR", "verification token not found", nil)
 		return
 	}
-	if err := d.Store.MarkDomainVerified(c, dom.ID); err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+	if err := d.Store.MarkDomainVerified(c, tenancy.Tx(c), dom.ID); err != nil {
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"id": dom.ID, "status": "verified"})

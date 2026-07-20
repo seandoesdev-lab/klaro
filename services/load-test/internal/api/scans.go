@@ -8,6 +8,7 @@ import (
 
 	"github.com/klaro/load-test/internal/model"
 	"github.com/klaro/load-test/internal/store"
+	"github.com/klaro/load-test/internal/tenancy"
 )
 
 func (d Deps) createScan(c *gin.Context) {
@@ -27,6 +28,8 @@ func (d Deps) createScan(c *gin.Context) {
 	}
 
 	pid := projectID(c)
+	tx := tenancy.Tx(c)
+	orgID := tenancy.OrgID(c)
 	sc := &model.Scan{ProjectID: pid, Type: st, Status: model.ScanStatusPending}
 
 	// DAST requires a verified target domain.
@@ -40,9 +43,9 @@ func (d Deps) createScan(c *gin.Context) {
 			writeError(c, 400, "VALIDATION_ERROR", "invalid target_url", nil)
 			return
 		}
-		verified, err := d.Store.IsDomainVerified(c, pid, host)
+		verified, err := d.Store.IsDomainVerified(c, tx, pid, host)
 		if err != nil {
-			writeError(c, 500, "INTERNAL", err.Error(), nil)
+			writeInternal(c, err)
 			return
 		}
 		if !verified {
@@ -60,49 +63,49 @@ func (d Deps) createScan(c *gin.Context) {
 		sc.Trigger = model.ScanTriggerManual
 	}
 
-	if err := d.Store.CreateScan(c, sc); err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+	if err := d.Store.CreateScan(c, tx, sc); err != nil {
+		writeInternal(c, err)
 		return
 	}
 
-	job := model.ScanJob{ScanID: sc.ID, ProjectID: pid, Type: st, TargetURL: req.TargetURL}
+	job := model.ScanJob{ScanID: sc.ID, OrgID: orgID, ProjectID: pid, Type: st, TargetURL: req.TargetURL}
 	if err := d.ScanQueue.EnqueueScan(c, job); err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{"id": sc.ID, "status": sc.Status})
 }
 
 func (d Deps) listScans(c *gin.Context) {
-	items, err := d.Store.ListScans(c, projectID(c))
+	items, err := d.Store.ListScans(c, tenancy.Tx(c), projectID(c))
 	if err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": items})
 }
 
 func (d Deps) getScan(c *gin.Context) {
-	sc, err := d.Store.GetScan(c, c.Param("id"))
+	sc, err := d.Store.GetScan(c, tenancy.Tx(c), c.Param("id"))
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(c, 404, "NOT_FOUND", "scan not found", nil)
 		return
 	}
 	if err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, sc)
 }
 
 func (d Deps) listFindings(c *gin.Context) {
-	if _, err := d.Store.GetScan(c, c.Param("id")); errors.Is(err, store.ErrNotFound) {
+	if _, err := d.Store.GetScan(c, tenancy.Tx(c), c.Param("id")); errors.Is(err, store.ErrNotFound) {
 		writeError(c, 404, "NOT_FOUND", "scan not found", nil)
 		return
 	}
-	items, err := d.Store.ListFindings(c, c.Param("id"))
+	items, err := d.Store.ListFindings(c, tenancy.Tx(c), c.Param("id"))
 	if err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": items})
@@ -122,13 +125,13 @@ func (d Deps) updateFinding(c *gin.Context) {
 		writeError(c, 400, "VALIDATION_ERROR", "status must be open, ignored or fixed", nil)
 		return
 	}
-	err := d.Store.UpdateFindingStatus(c, c.Param("findingId"), fs, req.IgnoreReason)
+	err := d.Store.UpdateFindingStatus(c, tenancy.Tx(c), c.Param("findingId"), fs, req.IgnoreReason)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(c, 404, "NOT_FOUND", "finding not found", nil)
 		return
 	}
 	if err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"id": c.Param("findingId"), "status": fs})

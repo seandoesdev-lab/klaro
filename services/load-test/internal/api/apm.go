@@ -1,7 +1,6 @@
 package api
 
 import (
-	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -9,7 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/klaro/load-test/internal/model"
-	"github.com/klaro/load-test/internal/store"
+	"github.com/klaro/load-test/internal/tenancy"
 )
 
 func (d Deps) createAgent(c *gin.Context) {
@@ -26,40 +25,27 @@ func (d Deps) createAgent(c *gin.Context) {
 		return
 	}
 	a := &model.ApmAgent{ProjectID: projectID(c), Language: lang}
-	if err := d.Store.CreateAgent(c, a); err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+	if err := d.Store.CreateAgent(c, tenancy.Tx(c), a); err != nil {
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{"id": a.ID, "ingest_token": a.IngestToken})
 }
 
 func (d Deps) listAgents(c *gin.Context) {
-	items, err := d.Store.ListAgents(c, projectID(c))
+	items, err := d.Store.ListAgents(c, tenancy.Tx(c), projectID(c))
 	if err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": items})
 }
 
-// apmIngest is authenticated by the X-Ingest-Token header (an agent's token),
-// NOT the dev bearer. Registered outside the auth group.
+// apmIngest is authenticated by authenticateIngest (X-Ingest-Token → org) and
+// runs inside an org-scoped tx (tenancyTx). Registered outside the auth group.
 func (d Deps) apmIngest(c *gin.Context) {
 	pid := c.Param("id")
-	token := c.GetHeader("X-Ingest-Token")
-	if token == "" {
-		writeError(c, 401, "UNAUTHENTICATED", "missing X-Ingest-Token", nil)
-		return
-	}
-	agent, err := d.Store.TouchAgent(c, pid, token)
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(c, 401, "UNAUTHENTICATED", "invalid ingest token", nil)
-		return
-	}
-	if err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
-		return
-	}
+	agent, _ := c.MustGet(ctxIngestAgent).(*model.ApmAgent)
 
 	var req struct {
 		Spans []model.ApmSpan `json:"spans"`
@@ -73,7 +59,7 @@ func (d Deps) apmIngest(c *gin.Context) {
 	now := time.Now().UTC()
 	for i := range req.Spans {
 		req.Spans[i].ProjectID = pid
-		if req.Spans[i].Service == "" {
+		if req.Spans[i].Service == "" && agent != nil {
 			req.Spans[i].Service = string(agent.Language)
 		}
 		if req.Spans[i].Ts.IsZero() {
@@ -86,12 +72,13 @@ func (d Deps) apmIngest(c *gin.Context) {
 			req.Logs[i].Ts = now
 		}
 	}
-	if err := d.Store.InsertSpans(c, req.Spans); err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+	tx := tenancy.Tx(c)
+	if err := d.Store.InsertSpans(c, tx, req.Spans); err != nil {
+		writeInternal(c, err)
 		return
 	}
-	if err := d.Store.InsertLogs(c, req.Logs); err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+	if err := d.Store.InsertLogs(c, tx, req.Logs); err != nil {
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{
@@ -106,18 +93,18 @@ func (d Deps) listSlowTraces(c *gin.Context) {
 			minMs = v
 		}
 	}
-	items, err := d.Store.SlowTraces(c, projectID(c), minMs)
+	items, err := d.Store.SlowTraces(c, tenancy.Tx(c), projectID(c), minMs)
 	if err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": items})
 }
 
 func (d Deps) getTrace(c *gin.Context) {
-	spans, err := d.Store.TraceByID(c, projectID(c), c.Param("traceId"))
+	spans, err := d.Store.TraceByID(c, tenancy.Tx(c), projectID(c), c.Param("traceId"))
 	if err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 	if len(spans) == 0 {
@@ -134,9 +121,9 @@ func (d Deps) listApmLogs(c *gin.Context) {
 			limit = v
 		}
 	}
-	items, err := d.Store.ListLogs(c, projectID(c), limit)
+	items, err := d.Store.ListLogs(c, tenancy.Tx(c), projectID(c), limit)
 	if err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": items})
@@ -146,14 +133,15 @@ func (d Deps) listApmLogs(c *gin.Context) {
 // not empty in the MVP demo. DEV-ONLY seed helper.
 func (d Deps) seedApmDemo(c *gin.Context) {
 	pid := projectID(c)
+	tx := tenancy.Tx(c)
 	now := time.Now().UTC()
 	spans, logs := demoTelemetry(pid, now)
-	if err := d.Store.InsertSpans(c, spans); err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+	if err := d.Store.InsertSpans(c, tx, spans); err != nil {
+		writeInternal(c, err)
 		return
 	}
-	if err := d.Store.InsertLogs(c, logs); err != nil {
-		writeError(c, 500, "INTERNAL", err.Error(), nil)
+	if err := d.Store.InsertLogs(c, tx, logs); err != nil {
+		writeInternal(c, err)
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{
