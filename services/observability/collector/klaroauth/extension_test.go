@@ -16,6 +16,11 @@ import (
 
 const testOrg = "00000000-0000-0000-0000-0000000000aa"
 
+// testInternalToken stands in for the shared secret this gateway presents to
+// the control plane's internal plane. It is required whenever the hop runs
+// without a client certificate.
+const testInternalToken = "internal-token-for-tests-0123456789"
+
 // The tenant a header-forging client would try to write into.
 const (
 	evilOrg     = "00000000-0000-0000-0000-0000000000ee"
@@ -43,7 +48,7 @@ const okGrant = `{"org_id":"00000000-0000-0000-0000-0000000000aa","key_id":"0000
 
 func newTestExtension(t *testing.T, endpoint string, tune func(*Config)) *authExtension {
 	t.Helper()
-	cfg := Config{Endpoint: endpoint, TLS: TLSConfig{Insecure: true}}
+	cfg := Config{Endpoint: endpoint, TLS: TLSConfig{Insecure: true}, InternalToken: testInternalToken}
 	if tune != nil {
 		tune(&cfg)
 	}
@@ -55,6 +60,53 @@ func newTestExtension(t *testing.T, endpoint string, tune func(*Config)) *authEx
 		t.Fatal(err)
 	}
 	return a
+}
+
+// The gateway has to authenticate itself, not just forward the customer's key:
+// the control plane's internal plane refuses an unauthenticated caller whether
+// or not the transport is encrypted (F-3).
+func TestGatewayPresentsItsInternalTokenToTheControlPlane(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(okGrant))
+	}))
+	defer srv.Close()
+
+	a := newTestExtension(t, srv.URL, nil)
+	if _, err := a.resolve(context.Background(), "obsk_whatever"); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got != "Bearer "+testInternalToken {
+		t.Errorf("Authorization = %q, want the internal token", got)
+	}
+}
+
+// A 401 on this endpoint is ambiguous: the customer's key may be bad, or this
+// gateway's own credential may be. Mistaking the second for the first would
+// negatively cache a perfectly good key and read, in the logs, as every
+// customer's key being revoked at once.
+func TestGatewayCredentialRejectionIsNotReportedAsABadIngestKey(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="klaro-internal"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	a := newTestExtension(t, srv.URL, nil)
+	_, err := a.resolve(context.Background(), "obsk_a-good-key")
+	if err == nil {
+		t.Fatal("a rejected gateway credential must still be an error")
+	}
+	if errors.Is(err, ErrUnauthorized) {
+		t.Errorf("gateway rejection reported as a bad ingest key: %v", err)
+	}
+	// Not cached either, or a fixed token would keep a whole fleet rejected
+	// past the point where it is corrected.
+	if _, ok := a.cached(cacheKey("obsk_a-good-key")); ok {
+		t.Error("the rejection was negatively cached")
+	}
 }
 
 func sources(key string) map[string][]string {
@@ -228,13 +280,27 @@ func TestConfigValidate(t *testing.T) {
 			TLS:      TLSConfig{CAFile: "ca.pem", CertFile: "c.pem", KeyFile: "k.pem"},
 		}, true},
 		{"explicit dev plaintext", Config{
-			Endpoint: "http://cp:8443/internal/authz/ingest-key",
-			TLS:      TLSConfig{Insecure: true},
+			Endpoint:      "http://cp:8443/internal/authz/ingest-key",
+			TLS:           TLSConfig{Insecure: true},
+			InternalToken: testInternalToken,
 		}, true},
-		{"no endpoint", Config{TLS: TLSConfig{Insecure: true}}, false},
+		{"no endpoint", Config{TLS: TLSConfig{Insecure: true}, InternalToken: testInternalToken}, false},
 		// The dangerous case: plaintext without saying so out loud would send
 		// ingest secrets in the clear.
 		{"plaintext without opting in", Config{Endpoint: "http://cp/x"}, false},
+		// Plaintext transport skips encryption, not authentication: without a
+		// client certificate the token is the only thing identifying this
+		// gateway, and the control plane will refuse it (F-3).
+		{"plaintext without a credential", Config{
+			Endpoint: "http://cp:8443/internal/authz/ingest-key",
+			TLS:      TLSConfig{Insecure: true},
+		}, false},
+		{"both token forms", Config{
+			Endpoint:          "http://cp:8443/internal/authz/ingest-key",
+			TLS:               TLSConfig{Insecure: true},
+			InternalToken:     testInternalToken,
+			InternalTokenFile: "/run/secrets/token",
+		}, false},
 		{"https without a client bundle", Config{Endpoint: "https://cp/x"}, false},
 		{"negative ttl", Config{
 			Endpoint: "https://cp/x",

@@ -296,6 +296,22 @@ Header: X-Report-Password: s3cret
 
 **수집(SDK↔Collector)**: OTLP over gRPC + **mTLS 필수**. 헤더 `klaro-obs-key: <org 키 시크릿>`. Collector가 키 검증·쿼터 집행·테넌트 라우팅.
 
+**조회/관리 인증(사용자↔CP)**: `Authorization: Bearer <JWT>`. 서명 알고리즘은 **배포 설정값 하나**(HS256 또는 RS256)로만 검증한다 — 토큰이 선언한 `alg`를 따르지 않는다. 필수 클레임 `org_id`(uuid) · `role` · `exp`.
+
+- **스코프는 클레임이 정한다.** §1의 `X-Org-Id` 헤더는 이 평면에서 스코프 선택에 쓰이지 않는다. 경로의 `:orgId`는 클레임의 org를 **지목**만 할 수 있고, 다르면 `403 FORBIDDEN`(SQL 이전). 그 org가 곧 RLS 세션 스코프(`app.current_org`)다.
+- **역할별 인가**(`owner/admin/member/viewer`):
+
+| 게이트 | 최소 역할 | 대상 |
+|--------|----------|------|
+| 조회 | `member` | `GET /obs/tenant` · `GET /obs/keys` · `GET /obs/quota` · Explorer(`metrics/query`·`traces`·`traces/:traceId`·`logs`) · `GET /obs/alert-rules[/:ruleId]` · `GET /obs/alert-events` · `GET /obs/dashboards[/:dashId]` · `GET /obs/live`(WS) |
+| 변경 | `admin` | `POST/DELETE /obs/keys[/:keyId[/rotate]]` · `POST/PATCH/DELETE /obs/alert-rules[/:ruleId]` · `POST/PATCH/DELETE /obs/dashboards[/:dashId]` |
+
+조회 하한이 `viewer`가 아니라 `member`인 것은 의도다: 이 평면은 테넌트의 관측 이력 전체를 노출하므로 열람이 최저 권한일 수 없다. `viewer`는 klaro 전체 RBAC의 역할이고 상시 관측 평면에서는 아직 부여가 없다.
+
+`GET /obs/live`(WebSocket)는 같은 `member+` 문턱이지만 거절을 close code로 알린다(`4403` 스코프 불일치·역할 부족, `4400` 잘못된 stream) — 브라우저 WebSocket API가 핸드셰이크 상태를 노출하지 않기 때문이다(설계 §4.3).
+
+**내부 평면(`/internal/*`, Collector·vmalert 전용)**: 별도 리스너. 전송은 mTLS이고, **인증은 전송과 분리**되어 검증된 클라이언트 인증서 **또는** 내부 공유 토큰(`Authorization: Bearer`)을 요구한다. 개발용 평문 전송을 켜도 인증은 유지된다. 거절 401에는 `WWW-Authenticate: Bearer realm="klaro-internal"`이 붙어, 수집 키 거절과 게이트웨이 자신의 거절을 구분한다.
+
 **POST** `/orgs/:orgId/obs/keys` — 관측 API 키 발급 [OBS-02]
 ```json
 // req

@@ -30,7 +30,7 @@ func deps() Deps {
 		DB:      nil,
 		Signal:  redisx.NewMemory(),
 		Tenants: tenants.NewStaticMapper(map[string]uint32{orgA: 1}),
-		Auth:    tenancy.DevTokenAuthenticator("dev", orgA),
+		Auth:    tenancy.DevTokenAuthenticator("dev", orgA, tenancy.RoleOwner),
 		// No backend URLs: the explorer handlers are reachable but every query
 		// reports an unconfigured backend, which is what the routing tests want.
 		Explorer: explorer.New(explorer.Config{}, tenants.NewStaticMapper(map[string]uint32{orgA: 1}), nil),

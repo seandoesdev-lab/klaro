@@ -1,13 +1,18 @@
-// Package tenancy resolves the caller org for a request and carries it into the
-// database session.
+// Package tenancy resolves the caller for a request and carries their org into
+// the database session.
 //
-// Two layers guard tenant isolation and both must hold:
+// Three layers guard tenant isolation and authorization, and all three must
+// hold:
 //
-//  1. This middleware, which rejects a request whose :orgId does not match the
-//     org the credential authenticated (a 403 before any SQL runs).
-//  2. Postgres RLS, which filters on app.current_org inside db.WithOrg.
+//  1. Authentication (JWTAuthenticator): a signed token yields the org and the
+//     role. Both come from the signature-verified payload, never from a header
+//     or query parameter the caller controls.
+//  2. This middleware, which rejects a request whose :orgId does not match the
+//     org the credential authenticated (a 403 before any SQL runs), and
+//     RequireRole, which rejects a caller whose role is too low for the route.
+//  3. Postgres RLS, which filters on app.current_org inside db.WithOrg.
 //
-// Layer 1 gives a clean error and keeps handler code honest; layer 2 is the one
+// Layer 2 gives a clean error and keeps handler code honest; layer 3 is the one
 // that actually cannot be bypassed by a handler that forgets to filter.
 package tenancy
 
@@ -22,41 +27,61 @@ import (
 	"github.com/klaro/observability/internal/platform/httpx"
 )
 
-// ctxKey is unexported so no other package can plant an org in the context.
+// ctxKey is unexported so no other package can plant a principal in the
+// context.
 type ctxKey struct{}
 
-// ginKey is the gin.Context slot holding the resolved org.
-const ginKey = "klaro.org_id"
+// ginKeyPrincipal is the gin.Context slot holding the resolved principal.
+const ginKeyPrincipal = "klaro.principal"
 
-// Authenticator maps an incoming request to the org its credential belongs to.
+// Authenticator maps an incoming request to the principal its credential
+// represents.
 //
-// Real auth (JWT/OAuth + Org > Project > Resource RBAC) is not in this
-// foundation slice; DevTokenAuthenticator is the S1-equivalent stub and is the
-// single place to swap in.
+// JWTAuthenticator is the real implementation. DevTokenAuthenticator remains as
+// a local-development stub and is reachable only behind OBS_DEV_AUTH, so the
+// default path is always signature-verified.
 type Authenticator interface {
-	// Authenticate returns the caller org id, or ok=false to reject with 401.
-	Authenticate(c *gin.Context) (orgID string, ok bool)
+	// Authenticate returns the caller, or ok=false to reject with 401.
+	Authenticate(c *gin.Context) (Principal, bool)
 }
 
 // AuthenticatorFunc adapts a function to Authenticator.
-type AuthenticatorFunc func(c *gin.Context) (string, bool)
+type AuthenticatorFunc func(c *gin.Context) (Principal, bool)
 
 // Authenticate implements Authenticator.
-func (f AuthenticatorFunc) Authenticate(c *gin.Context) (string, bool) { return f(c) }
+func (f AuthenticatorFunc) Authenticate(c *gin.Context) (Principal, bool) { return f(c) }
 
-// DevTokenAuthenticator accepts one bearer token and pins it to one org, the
-// same dev stub shape S1 uses (services/load-test/internal/api/middleware.go).
-func DevTokenAuthenticator(token, orgID string) Authenticator {
-	return AuthenticatorFunc(func(c *gin.Context) (string, bool) {
-		if token == "" {
-			return "", false
+// BearerToken returns the token from an Authorization: Bearer header.
+//
+// Anything else - Basic, a bare token, an empty value after the scheme - is not
+// a bearer credential and is refused rather than guessed at.
+func BearerToken(c *gin.Context) (string, bool) {
+	token, found := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")
+	if !found {
+		return "", false
+	}
+	token = strings.TrimSpace(token)
+	return token, token != ""
+}
+
+// DevTokenAuthenticator accepts one bearer token and pins it to one org and
+// role, the same dev stub shape S1 uses
+// (services/load-test/internal/api/middleware.go).
+//
+// It is a development convenience and nothing more: config.Load refuses to
+// enable it unless OBS_DEV_AUTH is set, and refuses it outright in the
+// production profile. An unset token authenticates nobody, so a half-configured
+// deployment fails closed instead of accepting the empty string.
+func DevTokenAuthenticator(token, orgID string, role Role) Authenticator {
+	return AuthenticatorFunc(func(c *gin.Context) (Principal, bool) {
+		if token == "" || !role.Valid() {
+			return Principal{}, false
 		}
-		h := c.GetHeader("Authorization")
-		got, found := strings.CutPrefix(h, "Bearer ")
-		if !found || got != token {
-			return "", false
+		got, ok := BearerToken(c)
+		if !ok || got != token {
+			return Principal{}, false
 		}
-		return orgID, true
+		return Principal{OrgID: orgID, Role: role, Subject: "dev"}, true
 	})
 }
 
@@ -80,33 +105,40 @@ const (
 	OutcomeForbidden
 	// OutcomeInvalidOrgParam: the :orgId in the path is not a uuid.
 	OutcomeInvalidOrgParam
-	// OutcomeServerError: the authenticator produced a non-uuid org, which is a
-	// server bug and must never reach set_config.
+	// OutcomeServerError: the authenticator produced a principal that cannot be
+	// used - a non-uuid org, or a role outside the four. Either is a server or
+	// issuer bug and must never reach set_config or an authorization decision.
 	OutcomeServerError
 )
 
 // Resolve authenticates the caller and matches the :orgId path parameter
 // without writing anything to the response.
 //
-// On OutcomeOK the org is attached to the context, exactly as Middleware would.
-func Resolve(c *gin.Context, auth Authenticator) (string, Outcome) {
-	orgID, ok := auth.Authenticate(c)
+// On OutcomeOK the principal is attached to the context, exactly as Middleware
+// would.
+func Resolve(c *gin.Context, auth Authenticator) (Principal, Outcome) {
+	p, ok := auth.Authenticate(c)
 	if !ok {
-		return "", OutcomeUnauthenticated
+		return Principal{}, OutcomeUnauthenticated
 	}
-	if !db.ValidOrgID(orgID) {
-		return "", OutcomeServerError
+	if !db.ValidOrgID(p.OrgID) || !p.Role.Valid() {
+		return Principal{}, OutcomeServerError
 	}
 	if param := c.Param("orgId"); param != "" {
 		if !db.ValidOrgID(param) {
-			return "", OutcomeInvalidOrgParam
+			return Principal{}, OutcomeInvalidOrgParam
 		}
-		if !strings.EqualFold(param, orgID) {
-			return "", OutcomeForbidden
+		// The org that scopes the request is the one the credential vouched
+		// for; the path is only allowed to name it, never to choose it. A
+		// forged org_id claim therefore cannot reach another tenant's data - it
+		// can only fail to match the path it was aimed at, and it has to
+		// survive signature verification to get this far at all.
+		if !strings.EqualFold(param, p.OrgID) {
+			return Principal{}, OutcomeForbidden
 		}
 	}
-	Set(c, orgID)
-	return orgID, OutcomeOK
+	SetPrincipal(c, p)
+	return p, OutcomeOK
 }
 
 // Middleware authenticates the caller and, when the route carries an :orgId
@@ -124,34 +156,74 @@ func Middleware(auth Authenticator) gin.HandlerFunc {
 			// Cross-tenant attempt: authenticated for one org, addressing another.
 			httpx.Forbidden(c, "org scope mismatch")
 		default:
-			httpx.Internal(c, "authenticated org is not a valid uuid")
+			httpx.Internal(c, "authenticated principal is not usable")
 		}
 	}
 }
 
-// Set stores the resolved org on both the gin context and the request context,
-// so handlers and anything reading the plain context.Context agree.
-func Set(c *gin.Context, orgID string) {
-	c.Set(ginKey, orgID)
-	c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), ctxKey{}, orgID))
+// RequireRole rejects a caller whose role is below min.
+//
+// It must be mounted after Middleware: with no principal on the context there
+// is nothing to compare, and the answer is then 401 rather than 403 because the
+// caller has not been identified at all.
+func RequireRole(min Role) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		p, ok := PrincipalFromGin(c)
+		if !ok {
+			httpx.Unauthenticated(c, "missing or invalid credentials")
+			return
+		}
+		if !p.Role.AtLeast(min) {
+			// The message names the requirement but not the caller's role: the
+			// client already knows what it authenticated as, and echoing a
+			// claim back is how claim values end up in someone's log pipeline.
+			httpx.Forbidden(c, "role must be at least "+string(min))
+			return
+		}
+		c.Next()
+	}
+}
+
+// SetPrincipal stores the resolved caller on both the gin context and the
+// request context, so handlers and anything reading the plain context.Context
+// agree.
+func SetPrincipal(c *gin.Context, p Principal) {
+	c.Set(ginKeyPrincipal, p)
+	c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), ctxKey{}, p))
+}
+
+// PrincipalFromGin returns the caller resolved by Middleware.
+func PrincipalFromGin(c *gin.Context) (Principal, bool) {
+	v, exists := c.Get(ginKeyPrincipal)
+	p, isPrincipal := v.(Principal)
+	return p, exists && isPrincipal && p.OrgID != ""
 }
 
 // FromGin returns the org resolved by Middleware.
 func FromGin(c *gin.Context) (string, bool) {
-	v, ok := c.Get(ginKey)
-	s, isStr := v.(string)
-	return s, ok && isStr && s != ""
+	p, ok := PrincipalFromGin(c)
+	return p.OrgID, ok
 }
 
 // FromContext returns the org carried on a plain context.
 func FromContext(ctx context.Context) (string, bool) {
-	s, ok := ctx.Value(ctxKey{}).(string)
-	return s, ok && s != ""
+	p, ok := ctx.Value(ctxKey{}).(Principal)
+	return p.OrgID, ok && p.OrgID != ""
+}
+
+// PrincipalFromContext returns the caller carried on a plain context.
+func PrincipalFromContext(ctx context.Context) (Principal, bool) {
+	p, ok := ctx.Value(ctxKey{}).(Principal)
+	return p, ok && p.OrgID != ""
 }
 
 // WithContext attaches an org to a context (background jobs, tests).
+//
+// Background work carries no role, because giving it one would invent an
+// authorization decision nobody made. RequireRole never sees these contexts -
+// they do not pass through the HTTP surface.
 func WithContext(ctx context.Context, orgID string) context.Context {
-	return context.WithValue(ctx, ctxKey{}, orgID)
+	return context.WithValue(ctx, ctxKey{}, Principal{OrgID: orgID})
 }
 
 // InTx runs fn inside a transaction scoped to the request org.

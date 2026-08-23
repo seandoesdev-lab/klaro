@@ -63,6 +63,10 @@ type meter struct {
 	logger *zap.Logger
 	client *http.Client
 
+	// internalToken authenticates this gateway to the control plane's internal
+	// plane. Resolved once at construction rather than on every flush.
+	internalToken string
+
 	mu   sync.Mutex
 	orgs map[string]*orgCounters
 }
@@ -73,11 +77,16 @@ func newMeter(cfg Config, logger *zap.Logger) (*meter, error) {
 	if err != nil {
 		return nil, err
 	}
+	token, err := cfg.resolveInternalToken()
+	if err != nil {
+		return nil, err
+	}
 	return &meter{
-		cfg:    cfg,
-		logger: logger,
-		client: &http.Client{Transport: transport, Timeout: cfg.Timeout},
-		orgs:   map[string]*orgCounters{},
+		cfg:           cfg,
+		logger:        logger,
+		client:        &http.Client{Transport: transport, Timeout: cfg.Timeout},
+		internalToken: token,
+		orgs:          map[string]*orgCounters{},
 	}, nil
 }
 
@@ -179,6 +188,12 @@ func (m *meter) flush(ctx context.Context) {
 			continue
 		}
 		req.Header.Set("Content-Type", "application/json")
+		if m.internalToken != "" {
+			// The control plane accepts either a verified client certificate or
+			// this token; sending it under mTLS too keeps metering working
+			// across a certificate rollout.
+			req.Header.Set("Authorization", "Bearer "+m.internalToken)
+		}
 
 		resp, err := m.client.Do(req)
 		if err != nil {

@@ -101,6 +101,7 @@ deploy/                  compose: postgres · redis · obsplane · collector · 
 격리는 **세 층**이고 전부 성립해야 한다.
 
 1. `tenancy.Middleware` — 인증된 org와 경로의 `:orgId`가 다르면 `403 FORBIDDEN`. SQL 이전에 차단.
+   인증된 org는 **서명 검증을 통과한 JWT 클레임**에서 오므로, 헤더나 쿼리로 바꿀 수 없다.
 2. **Postgres RLS** — org 스코프 테이블 전부 `ENABLE` + **`FORCE`** ROW LEVEL SECURITY.
 3. **저장소 native 테넌시** — VictoriaMetrics `AccountID`, Tempo/Loki `X-Scope-OrgID`(HOW-8).
    이 값은 CP만 정한다. 라벨 매처를 빠뜨려서 생기는 사고를 구조적으로 없앤다.
@@ -363,7 +364,8 @@ Grafana 임베드가 아니므로 패널이 외부에서 주소 지정될 필요
 | `OBS_KEY_TOUCH_WINDOW_SEC` | `60` | `last_used_at` 기록 주기 |
 | `OBS_INTERNAL_ADDR` | `:8443` | 내부 리스너(Collector·vmalert) |
 | `OBS_TLS_CA_FILE` / `OBS_TLS_CERT_FILE` / `OBS_TLS_KEY_FILE` | — | 셋을 함께 설정해야 한다(부분 설정은 기동 실패) |
-| `OBS_INTERNAL_INSECURE` | `false` | 내부 평면 평문. **개발 전용**, 명시적으로 켜야 한다 |
+| `OBS_INTERNAL_INSECURE` | `false` | 내부 평면 **전송**만 평문. 개발 전용, 명시적으로 켜야 하고 `OBS_INTERNAL_TOKEN` 없이는 기동 실패 |
+| `OBS_INTERNAL_TOKEN` | — | 내부 평면 공유 비밀(24자 이상). Collector·vmalert가 `Authorization: Bearer`로 제시 |
 | `OBS_VMSELECT_URL` | — | Explorer 메트릭 백엔드(vmselect). 비면 "백엔드 없음"으로 502 |
 | `OBS_TEMPO_URL` | — | Explorer 트레이스 백엔드 |
 | `OBS_LOKI_URL` | — | Explorer 로그 백엔드 |
@@ -378,10 +380,95 @@ Grafana 임베드가 아니므로 패널이 외부에서 주소 지정될 필요
 | `OBS_RETENTION_INTERVAL_SEC` | `21600` | 보존 집행 주기 |
 | `OBS_RETENTION_DRY_RUN` | `false` | 삭제 없이 로그만. 새 환경 첫 실행에 쓴다 |
 | `OBS_USAGE_INTERVAL_SEC` | `3600` | 과금 미터 발행 주기 |
-| `OBS_DEV_TOKEN` / `OBS_DEV_ORG_ID` | — | 개발 인증 스텁(S1과 동일 형태) |
+| `OBS_ENV` | `development` | `development` \| `production`. 프로덕션은 아래 개발용 완화를 전부 금지한다 |
+| `OBS_JWT_ALG` | `HS256` | `HS256` \| `RS256`. **토큰이 선언한 alg가 아니라 이 값으로만 검증한다** |
+| `OBS_JWT_HS_SECRET` / `OBS_JWT_HS_SECRET_FILE` | — | HS256 비밀(32바이트 이상). 둘 중 하나만 |
+| `OBS_JWT_PUBLIC_KEY_FILE` | — | RS256 검증 공개키(PEM). RS256이면 필수 |
+| `OBS_JWT_ISSUER` / `OBS_JWT_AUDIENCE` | — | 설정하면 `iss`/`aud`가 일치해야 한다 |
+| `OBS_JWT_LEEWAY_SEC` | `60` | `exp`/`nbf`/`iat` 시계 오차 허용 |
+| `OBS_DEV_AUTH` | `false` | 개발 인증 스텁을 켠다. **프로덕션 프로파일에서는 금지** |
+| `OBS_DEV_TOKEN` / `OBS_DEV_ORG_ID` / `OBS_DEV_ROLE` | — / — / `owner` | 스텁 설정. `OBS_DEV_AUTH`일 때 앞 둘은 필수 |
 
 TLS 번들도 없고 `OBS_INTERNAL_INSECURE`도 아니면 내부 리스너는 **뜨지 않는다**(로그로 알린다).
 mTLS가 계약이므로, 번들이 없다고 평문으로 조용히 내려앉지 않는다.
+
+### 배포 프로파일이 무엇을 막는가
+
+`OBS_ENV=production`은 개발용 완화 세 개를 **기동 실패**로 바꾼다. 경고 로그가 아니라 실패인
+이유는, 이 셋 중 어느 것도 프로덕션에서 "알고 감수하는 위험"이 될 수 없기 때문이다.
+
+| 완화 | 프로덕션에서 | 왜 |
+|------|-------------|-----|
+| `OBS_DEV_AUTH` | 거부 | 고정 문자열 하나가 org owner로 인증된다 |
+| `OBS_INTERNAL_INSECURE` | 거부 | 내부 토큰과 모든 페이로드가 평문으로 흐른다 |
+| DSN `sslmode=disable`/`prefer`/`allow`, 또는 미지정 | 거부 | 전 테넌트의 행과 격리 스코프가 평문으로 흐른다. `prefer`/`allow`는 조용히 평문으로 내려앉는다 (F-5) |
+
+기본 DSN의 `sslmode`도 프로파일을 따른다: 개발은 `disable`, 프로덕션은 `require`.
+
+### 인증과 인가 (공개 평면)
+
+기본이자 프로덕션의 유일한 경로는 **서명된 Bearer JWT**다. 스텁은 `OBS_DEV_AUTH` 뒤에만 있다.
+
+검증은 표준 라이브러리로 구현했다(`platform/jwtauth`). 유료 의존이 아니라 유지보수 판단이다
+([COST-05]는 유료만 금지한다) — 어차피 한 줄씩 읽어야 하는 코드라면, 감사할 의존성을 늘리지
+않는 편이 낫다. 거절하는 것과 그 이유:
+
+- **헤더의 `alg`가 설정값과 다르면** 거절. 토큰이 선언한 알고리즘을 따라가는 것이 전형적인 JWT
+  파괴다 — `"alg":"none"`은 누구나 인증되고, RS256 배포에 `"alg":"HS256"`을 보내면 **공개키로
+  서명**할 수 있다. 비교 대상이 "우리가 할 수 있는 알고리즘 목록"이 아니라 **설정된 단 하나**인
+  것이 이 두 공격을 한 줄로 닫는다.
+- **`exp` 없는 토큰** 거절. 기다려서 폐기할 수 없는 자격증명은 유출이 곧 영구 유출이다.
+- **`org_id`/`role` 없거나 못 쓰는 값** 거절. 이 둘이 RLS 스코프와 인가 결정이 되므로, 이상한
+  값은 기본값으로 내려앉는 대신 닫는다. 네 역할 밖의 `role`은 "낮은 역할"이 아니라 **역할 없음**
+  이다(viewer로 조용히 강등되지 않는다).
+
+`org_id`는 **경로가 고르지 않는다**. 스코프는 자격증명이 보증한 org이고 경로의 `:orgId`는 그것을
+지목만 할 수 있다(`tenancy.Resolve`). 그래서 위조 `org_id`는 두 겹에 막힌다 — 서명 없이는 인증
+자체가 안 되고, 발급자가 서명한 토큰이라도 자기 org만 열리므로 다른 org 경로에 겨누면 403이다.
+
+**역할별 인가**(설계 §2.1 `owner / admin / member / viewer`)는 라우터에서 두 그룹으로 갈린다:
+
+| 게이트 | 최소 역할 | 대상 |
+|--------|----------|------|
+| 조회 | `member` | 테넌트 프로브, 키 목록·쿼터, Explorer(메트릭·트레이스·로그), 룰·이벤트 조회, 대시보드 조회, 라이브 WS |
+| 변경 | `admin` | 키 발급·로테이션·폐기, 알림 룰 생성·수정·삭제, 대시보드 생성·수정·삭제 |
+
+조회 하한이 `viewer`가 아니라 `member`인 것은 의도다: 이 평면은 테넌트의 관측 이력 전체를
+노출하므로 열람이 최저 권한일 수 없다. `viewer`는 klaro 전체 RBAC의 역할이고 여기서는 아직
+부여가 없다 — 바꾸려면 `router.go`의 `read` 그룹 인자 한 개다.
+
+라이브 WebSocket도 같은 `member+` 문턱이지만 거절을 **close code**로 알린다. 브라우저
+WebSocket API는 핸드셰이크 상태를 노출하지 않아서, HTTP 상태로 거절하면 클라이언트가 1006만
+본다(설계 §4.3).
+
+## 내부 평면: 전송과 인증은 별개다 (F-3)
+
+`/internal/*`은 수집 키를 해석하고, 임의 org의 라이브 프레임을 발행하고, 과금 행을 쓰고,
+알림 이벤트를 주입한다. 예전에는 `OBS_INTERNAL_INSECURE` 하나가 **암호화와 인증을 동시에**
+껐다 — 포트에 닿을 수 있는 무엇이든 위의 전부를 할 수 있었다. 이제 둘은 분리되어 있다.
+
+`api.InternalAuth`가 모든 `/internal/*` 라우트에서 **둘 중 하나**를 요구한다:
+
+- **검증된 클라이언트 인증서** — `mtls.ServerConfig`가 `RequireAndVerifyClientCert`이므로
+  `VerifiedChains`가 비어 있지 않다는 것은 TLS 계층이 이미 피어를 CA로 인증했다는 뜻이다.
+  프로덕션 경로이고, 토큰이 따로 필요하지 않다.
+- **`OBS_INTERNAL_TOKEN`** — 상수 시간 비교. TLS를 끈 채로도 인증이 유지되는 이유다.
+  `OBS_INTERNAL_INSECURE`를 토큰 없이 켜면 `config.Load`가 기동을 거부한다.
+
+토큰이 비어 있으면 **아무도** 통과하지 못한다(전원 통과가 아니다). 비밀이 빠졌을 때의
+실패 모드는 닫힌 문이어야 한다. `/healthz`만 열려 있다 — 데이터를 읽지도 반환하지도 않는
+컨테이너 프로브다.
+
+한 가지 진단 장치: 이 평면의 401에는 `WWW-Authenticate: Bearer realm="klaro-internal"`이
+붙는다. `/internal/authz/ingest-key`에서 401은 두 가지를 뜻할 수 있는데 — 고객의 수집 키가
+거절됐거나, **게이트웨이 자신이** 거절됐거나 — 후자를 전자로 착각하면 멀쩡한 키를 negative
+캐시에 넣고 로그에는 "전 고객 키가 폐기됨"처럼 남는다. `klaroauth`가 이 realm을 보고 갈라낸다.
+
+클라이언트 쪽 설정: `klaroauth.internal_token`, `klarousage.internal_token`(파일 형태는
+`*_token_file`), 라이브 복제 익스포터는 `headers.Authorization`, vmalert는
+`-notifier.bearerToken`. 네 곳이 obsplane의 `OBS_INTERNAL_TOKEN`과 같은 값을 공유한다.
+게이트웨이 쪽 두 프로세서는 `tls.insecure`인데 토큰이 없으면 **기동 시** 실패한다 — 계량은
+fire-and-forget이라 401이 조용히 누적되고, 그건 "데이터를 안 보내는 org"처럼 보인다.
 
 ## mTLS를 어디서 강제하나
 

@@ -47,8 +47,7 @@ func TestWebhookIgnoresForeignAlerts(t *testing.T) {
 	body := `[{"labels":{"alertname":"SomeoneElsesAlert"},"startsAt":"2026-08-23T12:00:00Z"}]`
 	req := httptest.NewRequest(http.MethodPost, "/internal/alerts/webhook", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	NewInternalRouter(d).ServeHTTP(w, req)
+	w := serveInternal(d, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body)
@@ -67,8 +66,7 @@ func TestWebhookIsMountedOnBothPaths(t *testing.T) {
 	for _, path := range []string{"/internal/alerts/webhook", "/internal/alerts/api/v2/alerts"} {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader("[]"))
 		req.Header.Set("Content-Type", "application/json")
-		w := httptest.NewRecorder()
-		NewInternalRouter(d).ServeHTTP(w, req)
+		w := serveInternal(d, req)
 		if w.Code != http.StatusOK {
 			t.Errorf("POST %s = %d, want 200 (body %s)", path, w.Code, w.Body)
 		}
@@ -81,8 +79,7 @@ func TestUsageRouteValidates(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/internal/usage",
 		strings.NewReader(`{"org_id":"not-a-uuid"}`))
 	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	NewInternalRouter(d).ServeHTTP(w, req)
+	w := serveInternal(d, req)
 
 	// No usage store is wired in these deps, so a valid body would 500; an
 	// invalid one must be refused before that.
@@ -95,7 +92,6 @@ func TestUsageRouteValidates(t *testing.T) {
 func postInternalWith(d InternalDeps, path, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	NewInternalRouter(d).ServeHTTP(w, req)
+	w := serveInternal(d, req)
 	return w
 }

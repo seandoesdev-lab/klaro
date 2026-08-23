@@ -27,6 +27,11 @@ func keyModelJSONFields() string {
 	return b.String()
 }
 
+// testInternalToken stands in for OBS_INTERNAL_TOKEN. Every internal request in
+// these tests presents it, because the plane stays authenticated even when its
+// transport is plaintext (InternalAuth).
+const testInternalToken = "internal-token-for-tests-0123456789"
+
 func internalDeps() (InternalDeps, *redisx.Memory) {
 	mem := redisx.NewMemory()
 	// A nil *db.DB suffices for the paths under test: each must reject its input
@@ -34,16 +39,27 @@ func internalDeps() (InternalDeps, *redisx.Memory) {
 	return InternalDeps{
 		Authz:  ingestkey.NewAuthorizer(nil, ingestkey.NewStore(nil), nil, ingestkey.AuthorizerOptions{}),
 		Signal: mem,
+		Token:  testInternalToken,
 	}, mem
+}
+
+// serveInternal runs one request against a fresh internal router, presenting the
+// internal token the way the Collector does. A caller that set its own
+// Authorization header keeps it, so a test can send a wrong one on purpose.
+func serveInternal(d InternalDeps, req *http.Request) *httptest.ResponseRecorder {
+	if req.Header.Get("Authorization") == "" {
+		req.Header.Set("Authorization", "Bearer "+testInternalToken)
+	}
+	w := httptest.NewRecorder()
+	NewInternalRouter(d).ServeHTTP(w, req)
+	return w
 }
 
 func postInternal(path, body string) (*httptest.ResponseRecorder, *redisx.Memory) {
 	d, mem := internalDeps()
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	NewInternalRouter(d).ServeHTTP(w, req)
-	return w, mem
+	return serveInternal(d, req), mem
 }
 
 // Unknown, revoked, expired-grace and malformed must all look identical from
@@ -72,8 +88,7 @@ func TestAuthzAcceptsTheHeaderForm(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/internal/authz/ingest-key", strings.NewReader("{}"))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(IngestKeyHeader, "obsk_definitely-not-a-real-key")
-	w := httptest.NewRecorder()
-	NewInternalRouter(d).ServeHTTP(w, req)
+	w := serveInternal(d, req)
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401 (body %s)", w.Code, w.Body)
@@ -92,8 +107,7 @@ func TestLiveIngestPublishesOnTheOrgChannel(t *testing.T) {
 	body := `{"org_id":"` + orgA + `","stream":"metric","ts":1756000000000,` +
 		`"points":[{"labels":{"service":"api"},"value":1.5}]}`
 	req := httptest.NewRequest(http.MethodPost, "/internal/live-ingest", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	NewInternalRouter(d).ServeHTTP(w, req)
+	w := serveInternal(d, req)
 
 	// Accepted, not OK: pub/sub is fire-and-forget by design (HOW-7).
 	if w.Code != http.StatusAccepted {
@@ -137,8 +151,7 @@ func TestLiveIngestDoesNotCrossOrgs(t *testing.T) {
 
 	body := `{"org_id":"` + orgA + `","stream":"metric","points":[]}`
 	req := httptest.NewRequest(http.MethodPost, "/internal/live-ingest", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	NewInternalRouter(d).ServeHTTP(w, req)
+	w := serveInternal(d, req)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202", w.Code)
 	}
@@ -197,8 +210,7 @@ func TestLiveIngestSplitsOTLPByOrg(t *testing.T) {
 	   "scopeMetrics":[{"metrics":[{"name":"db.client.duration","gauge":{"dataPoints":[{"asDouble":34}]}}]}]}]}`
 
 	req := httptest.NewRequest(http.MethodPost, "/internal/live-ingest", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	NewInternalRouter(d).ServeHTTP(w, req)
+	w := serveInternal(d, req)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202 (body %s)", w.Code, w.Body)
 	}
@@ -278,8 +290,7 @@ func TestLiveIngestAcceptsGzippedOTLP(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/internal/live-ingest", &buf)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Content-Encoding", "gzip")
-	w := httptest.NewRecorder()
-	NewInternalRouter(d).ServeHTTP(w, req)
+	w := serveInternal(d, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202 (body %s)", w.Code, w.Body)

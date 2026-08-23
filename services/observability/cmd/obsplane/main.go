@@ -22,6 +22,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -41,6 +42,7 @@ import (
 	"github.com/klaro/observability/internal/platform/audit"
 	"github.com/klaro/observability/internal/platform/config"
 	"github.com/klaro/observability/internal/platform/db"
+	"github.com/klaro/observability/internal/platform/jwtauth"
 	"github.com/klaro/observability/internal/platform/mtls"
 	"github.com/klaro/observability/internal/platform/redisx"
 	"github.com/klaro/observability/internal/retention"
@@ -65,6 +67,13 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Built before anything is dialled: a process that cannot verify a
+	// credential has no business opening a database pool.
+	auth, err := authenticator(cfg)
+	if err != nil {
+		return err
+	}
 
 	if cfg.AutoMigrate {
 		if err := migrate(ctx, cfg); err != nil {
@@ -147,7 +156,7 @@ func run() error {
 			DB:               database,
 			Signal:           signaler,
 			Tenants:          tenantMapper,
-			Auth:             tenancy.DevTokenAuthenticator(os.Getenv("OBS_DEV_TOKEN"), os.Getenv("OBS_DEV_ORG_ID")),
+			Auth:             auth,
 			Keys:             keys,
 			Authz:            authorizer,
 			Audit:            audit.NewPG(database),
@@ -168,6 +177,9 @@ func run() error {
 		Alerts:    alerting.NewReceiver(rules, signaler),
 		Usage:     usageStore,
 		Snapshots: snapshots,
+		// The internal plane authenticates independently of its transport, so
+		// this stays set whether or not mTLS is in front of it.
+		Token: cfg.InternalToken,
 	})
 	if err != nil {
 		return err
@@ -230,6 +242,56 @@ func run() error {
 	return nil
 }
 
+// authenticator builds the public plane's credential from the configuration.
+//
+// JWT is the default and the only production path; the dev stub is reachable
+// only when OBS_DEV_AUTH was set, which config.Load refuses outright in the
+// production profile. Either way this returns an authenticator or an error -
+// there is no "no authentication" branch to fall into.
+func authenticator(cfg config.Config) (tenancy.Authenticator, error) {
+	a := cfg.Auth
+	if a.DevStub {
+		role, ok := tenancy.ParseRole(a.DevRole)
+		if !ok {
+			// config.Load already checked this; keeping the check means a
+			// future config change cannot smuggle an unusable role through.
+			return nil, fmt.Errorf("OBS_DEV_ROLE %q is not a klaro role", a.DevRole)
+		}
+		log.Printf("WARNING: public plane is using the development auth stub "+
+			"(OBS_DEV_AUTH): one static token authenticates as %s of org %s",
+			role, a.DevOrgID)
+		return tenancy.DevTokenAuthenticator(a.DevToken, a.DevOrgID, role), nil
+	}
+
+	opts := jwtauth.Options{
+		Alg:      a.JWTAlg,
+		HSSecret: a.JWTHSSecret,
+		Issuer:   a.JWTIssuer,
+		Audience: a.JWTAudience,
+		Leeway:   a.JWTLeeway,
+	}
+	if a.JWTAlg == jwtauth.RS256 {
+		key, err := jwtauth.ParseRSAPublicKeyFile(a.JWTPublicKeyFile)
+		if err != nil {
+			return nil, err
+		}
+		opts.RSAPublicKey = key
+	}
+	verifier, err := jwtauth.New(opts)
+	if err != nil {
+		return nil, err
+	}
+	// Neither iss nor aud is required, but without them any token this key
+	// signs is accepted - including one minted for a different klaro service.
+	// Worth saying out loud once at boot.
+	if a.JWTIssuer == "" || a.JWTAudience == "" {
+		log.Print("note: OBS_JWT_ISSUER/OBS_JWT_AUDIENCE are not both set; " +
+			"any token signed by the configured key will be accepted")
+	}
+	log.Printf("public plane authenticating with %s bearer JWT", a.JWTAlg)
+	return tenancy.JWTAuthenticator(verifier), nil
+}
+
 // internalServer builds the Collector-facing listener, or nil when it is turned
 // off entirely.
 //
@@ -237,6 +299,10 @@ func run() error {
 // bundle does not quietly become a plaintext port: it either disables the
 // listener or, when the operator explicitly asked for it with
 // OBS_INTERNAL_INSECURE, serves plaintext and says so in the log on every boot.
+//
+// Plaintext is not anonymous. api.InternalAuth still requires the internal
+// token on every route, and config.Load refuses OBS_INTERNAL_INSECURE without
+// one, so relaxing the transport no longer relaxes authentication with it.
 func internalServer(cfg config.Config, deps api.InternalDeps) (*http.Server, error) {
 	if cfg.InternalAddr == "" {
 		return nil, nil
@@ -260,8 +326,11 @@ func internalServer(cfg config.Config, deps api.InternalDeps) (*http.Server, err
 		srv.TLSConfig = tlsCfg
 		return srv, nil
 	case cfg.InternalInsecure:
-		log.Print("WARNING: internal plane is plaintext (OBS_INTERNAL_INSECURE); " +
-			"set OBS_TLS_CA_FILE/CERT/KEY for the mTLS the design requires")
+		log.Print("WARNING: internal plane transport is plaintext " +
+			"(OBS_INTERNAL_INSECURE); requests are still authenticated with " +
+			"OBS_INTERNAL_TOKEN, but the token and every payload cross the " +
+			"network in the clear. Set OBS_TLS_CA_FILE/CERT/KEY for the mTLS " +
+			"the design requires.")
 		return srv, nil
 	default:
 		log.Print("internal plane disabled: no mTLS bundle configured and " +
