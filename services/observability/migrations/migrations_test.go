@@ -14,6 +14,7 @@ var orgScopedTables = []string{
 	"observability_keys",
 	"observability_hosts",
 	"observability_usage_rollups",
+	"observability_tenants",
 	"alert_rules",
 	"alert_events",
 	"dashboards",
@@ -48,6 +49,9 @@ func TestExpectedMigrationsArePresent(t *testing.T) {
 		"0005_alert_events.sql",
 		"0006_dashboards.sql",
 		"0007_plans_observability.sql",
+		"0008_observability_tenants.sql",
+		"0009_observability_key_rotation.sql",
+		"0010_organizations_plan.sql",
 	}
 	got, err := fs.Glob(FS, "*.sql")
 	if err != nil {

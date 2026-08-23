@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/klaro/observability/internal/platform/db"
 )
 
@@ -40,55 +42,121 @@ func scopeOrgID(orgID string) (string, error) {
 	return orgID, nil
 }
 
-// MemoryMapper is the build-order step 2 stub: it hands out VM AccountIDs
-// sequentially on first sight and remembers them for the process lifetime.
+// PGMapper is the durable mapper backed by observability_tenants (migration
+// 0008). Assignment happens on first sight and is then immutable: the table
+// grants the app role SELECT and INSERT but not UPDATE, because changing an
+// AccountID would hand one org's already-written VictoriaMetrics series to
+// another org - a leak that happens outside Postgres, where RLS cannot see it.
 //
-// Deliberately NOT a hash of the org uuid. A 32-bit hash collides, and two orgs
-// sharing an AccountID would merge their metrics inside VictoriaMetrics - a
-// silent cross-tenant leak that RLS cannot catch because it happens outside
-// Postgres. Sequential assignment cannot collide.
-//
-// The cost is that assignments are not durable: a restart renumbers, which
-// would orphan already-written series. That is acceptable while nothing writes
-// to VM yet (Collector routing is build-order step 4), and it MUST be replaced
-// by a persisted assignment table before step 4 ships. StaticMapper shows the
-// read-only shape a durable implementation will take.
-type MemoryMapper struct {
-	mu     sync.Mutex
-	byOrg  map[string]uint32
-	nextID uint32
+// Because the mapping is immutable, it is safe to memoise for the process
+// lifetime. That matters: the Collector authz path resolves a tenant on every
+// cache miss, and this keeps it off the database.
+type PGMapper struct {
+	db *db.DB
+
+	mu    sync.RWMutex
+	byOrg map[string]uint32
 }
 
-// NewMemoryMapper starts assignment at 1. AccountID 0 is left unused because
-// VictoriaMetrics treats it as the default account, and a bug that produced 0
-// would dump one org into the shared bucket.
-func NewMemoryMapper() *MemoryMapper {
-	return &MemoryMapper{byOrg: map[string]uint32{}, nextID: 1}
+// NewPGMapper builds a durable mapper over d.
+func NewPGMapper(d *db.DB) *PGMapper {
+	return &PGMapper{db: d, byOrg: map[string]uint32{}}
 }
 
-// VMAccountID implements Mapper, assigning on first use.
-func (m *MemoryMapper) VMAccountID(_ context.Context, orgID string) (uint32, error) {
+// assignSQL takes the AccountID from a sequence rather than from
+// max(vm_account_id)+1: under RLS this transaction can only see its own org's
+// row, so it has no way to look at the others. A sequence needs no such read
+// and cannot hand out a duplicate.
+//
+// ON CONFLICT DO NOTHING makes a concurrent first-use race harmless - the loser
+// simply reads the winner's row back.
+const assignSQL = `
+INSERT INTO observability_tenants (org_id, scope_org_id)
+VALUES (current_setting('app.current_org')::uuid, current_setting('app.current_org'))
+ON CONFLICT (org_id) DO NOTHING
+RETURNING vm_account_id`
+
+const selectSQL = `
+SELECT vm_account_id FROM observability_tenants
+WHERE org_id = current_setting('app.current_org')::uuid`
+
+// VMAccountID implements Mapper, assigning durably on first use.
+func (m *PGMapper) VMAccountID(ctx context.Context, orgID string) (uint32, error) {
 	if !db.ValidOrgID(orgID) {
 		return 0, fmt.Errorf("%w: %q", ErrInvalidOrg, orgID)
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if id, ok := m.byOrg[orgID]; ok {
+	if id, ok := m.cached(orgID); ok {
 		return id, nil
 	}
-	id := m.nextID
-	m.nextID++
-	m.byOrg[orgID] = id
+	var id uint32
+	err := m.db.WithOrg(ctx, orgID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		id, err = AssignTx(ctx, tx)
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	m.remember(orgID, id)
 	return id, nil
 }
 
-// ScopeOrgID implements Mapper.
-func (m *MemoryMapper) ScopeOrgID(_ context.Context, orgID string) (string, error) {
+// ScopeOrgID implements Mapper. An org with no VM assignment is not routable to
+// Tempo or Loki either, so resolving the header also materialises the row.
+func (m *PGMapper) ScopeOrgID(ctx context.Context, orgID string) (string, error) {
+	if _, err := m.VMAccountID(ctx, orgID); err != nil {
+		return "", err
+	}
 	return scopeOrgID(orgID)
 }
 
-// StaticMapper resolves from a fixed table and refuses unknown orgs. This is
-// the shape a durable, table-backed mapper will expose.
+// Remember seeds the cache from a lookup a caller already performed inside its
+// own transaction (the Collector authz path resolves key, tenant and quota in
+// one round trip).
+func (m *PGMapper) Remember(orgID string, accountID uint32) { m.remember(orgID, accountID) }
+
+func (m *PGMapper) cached(orgID string) (uint32, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	id, ok := m.byOrg[orgID]
+	return id, ok
+}
+
+func (m *PGMapper) remember(orgID string, id uint32) {
+	if id == 0 {
+		return // never cache the VictoriaMetrics default account
+	}
+	m.mu.Lock()
+	m.byOrg[orgID] = id
+	m.mu.Unlock()
+}
+
+// AssignTx resolves - creating if absent - the VM AccountID for the org of an
+// already tenant-scoped transaction. Callers that are mid-transaction (authz,
+// quota) use this so the assignment commits with the rest of their work.
+func AssignTx(ctx context.Context, tx pgx.Tx) (uint32, error) {
+	var id uint32
+	err := tx.QueryRow(ctx, assignSQL).Scan(&id)
+	switch {
+	case err == nil:
+		return id, nil
+	case errors.Is(err, pgx.ErrNoRows):
+		// DO NOTHING returns no row when the org was already assigned.
+	default:
+		return 0, fmt.Errorf("assign vm account id: %w", err)
+	}
+	if err := tx.QueryRow(ctx, selectSQL).Scan(&id); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, ErrNotMapped
+		}
+		return 0, fmt.Errorf("read vm account id: %w", err)
+	}
+	return id, nil
+}
+
+// StaticMapper resolves from a fixed table and refuses unknown orgs. It exists
+// for tests and for the read-only fixtures the router tests use; production
+// wiring uses PGMapper.
 type StaticMapper struct{ ByOrg map[string]uint32 }
 
 // NewStaticMapper copies the supplied assignments.
@@ -126,6 +194,6 @@ func (m *StaticMapper) ScopeOrgID(ctx context.Context, orgID string) (string, er
 func VMTenantPath(accountID uint32) string { return strconv.FormatUint(uint64(accountID), 10) }
 
 var (
-	_ Mapper = (*MemoryMapper)(nil)
+	_ Mapper = (*PGMapper)(nil)
 	_ Mapper = (*StaticMapper)(nil)
 )

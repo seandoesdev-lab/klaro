@@ -38,6 +38,21 @@ type Config struct {
 	InternalAddr string
 	TLS          TLSPaths
 
+	// InternalInsecure serves the internal plane in plaintext. mTLS is the
+	// contract for Collector -> CP (CLAUDE.md), so this exists only so a local
+	// docker-compose run can work before certificates are minted, and it has to
+	// be asked for explicitly - a missing bundle never silently downgrades.
+	InternalInsecure bool
+
+	// RotationGrace is how long a rotated observability key keeps being accepted
+	// alongside its replacement (design HOW-4).
+	RotationGrace time.Duration
+	// AuthzCacheTTL is how long the Collector may reuse an ingest-key grant. It
+	// is also the worst-case delay before a revocation takes effect.
+	AuthzCacheTTL time.Duration
+	// KeyTouchWindow rate-limits observability_keys.last_used_at writes.
+	KeyTouchWindow time.Duration
+
 	// AutoMigrate applies migrations/*.sql on boot (dev convenience).
 	AutoMigrate bool
 
@@ -82,6 +97,7 @@ func Load(getenv func(string) string) (Config, error) {
 		RedisAddr:          str(getenv, "OBS_REDIS_ADDR", "localhost:6379"),
 		InternalAddr:       str(getenv, "OBS_INTERNAL_ADDR", ":8443"),
 		AutoMigrate:        boolean(getenv, "OBS_AUTO_MIGRATE", true),
+		InternalInsecure:   boolean(getenv, "OBS_INTERNAL_INSECURE", false),
 		DBConnectTimeout:   10 * time.Second,
 		TLS: TLSPaths{
 			CAFile:   getenv("OBS_TLS_CA_FILE"),
@@ -101,13 +117,28 @@ func Load(getenv func(string) string) (Config, error) {
 		c.DBMaxConns = int32(n)
 	}
 
-	secs, err := integer(getenv, "OBS_ACTIVE_HOST_WINDOW_SEC", 900)
-	if err != nil {
-		errs = append(errs, err.Error())
-	} else if secs < 1 {
-		errs = append(errs, "OBS_ACTIVE_HOST_WINDOW_SEC must be >= 1")
-	} else {
-		c.ActiveHostWindow = time.Duration(secs) * time.Second
+	// Seconds-valued settings. Each rejects zero rather than falling back: a
+	// zero window would silently mean "no hosts are active" or "no grace at
+	// all", both of which look like working configuration.
+	for _, d := range []struct {
+		key    string
+		def    int
+		target *time.Duration
+	}{
+		{"OBS_ACTIVE_HOST_WINDOW_SEC", 900, &c.ActiveHostWindow},
+		{"OBS_KEY_ROTATION_GRACE_SEC", 86400, &c.RotationGrace},
+		{"OBS_AUTHZ_CACHE_TTL_SEC", 30, &c.AuthzCacheTTL},
+		{"OBS_KEY_TOUCH_WINDOW_SEC", 60, &c.KeyTouchWindow},
+	} {
+		secs, err := integer(getenv, d.key, d.def)
+		switch {
+		case err != nil:
+			errs = append(errs, err.Error())
+		case secs < 1:
+			errs = append(errs, d.key+" must be >= 1")
+		default:
+			*d.target = time.Duration(secs) * time.Second
+		}
 	}
 
 	if !strings.HasPrefix(c.DatabaseURL, "postgres://") && !strings.HasPrefix(c.DatabaseURL, "postgresql://") {

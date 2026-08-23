@@ -26,7 +26,7 @@ func deps() Deps {
 	return Deps{
 		DB:      nil,
 		Signal:  redisx.NewMemory(),
-		Tenants: tenants.NewMemoryMapper(),
+		Tenants: tenants.NewStaticMapper(map[string]uint32{orgA: 1}),
 		Auth:    tenancy.DevTokenAuthenticator("dev", orgA),
 	}
 }

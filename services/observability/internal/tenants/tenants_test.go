@@ -13,99 +13,13 @@ const (
 	orgC = "00000000-0000-0000-0000-00000000000c"
 )
 
-func TestMemoryMapperIsStableAndCollisionFree(t *testing.T) {
-	ctx := context.Background()
-	m := NewMemoryMapper()
-
-	a1, err := m.VMAccountID(ctx, orgA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	a2, err := m.VMAccountID(ctx, orgA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if a1 != a2 {
-		t.Errorf("same org got %d then %d", a1, a2)
-	}
-
-	b, err := m.VMAccountID(ctx, orgB)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if b == a1 {
-		t.Fatalf("orgs A and B share AccountID %d; their metrics would merge in VM", b)
-	}
-}
-
-// AccountID 0 is the VictoriaMetrics default account. Handing it to an org
-// would mix that tenant into the shared bucket.
-func TestMemoryMapperNeverReturnsZero(t *testing.T) {
-	ctx := context.Background()
-	m := NewMemoryMapper()
-	for _, org := range []string{orgA, orgB, orgC} {
-		id, err := m.VMAccountID(ctx, org)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if id == 0 {
-			t.Fatalf("org %s mapped to AccountID 0", org)
-		}
-	}
-}
-
-func TestMemoryMapperConcurrentAssignmentIsUnique(t *testing.T) {
-	ctx := context.Background()
-	m := NewMemoryMapper()
-	orgs := []string{orgA, orgB, orgC}
-
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	seen := map[string]uint32{}
-	for i := 0; i < 50; i++ {
-		for _, org := range orgs {
-			wg.Add(1)
-			go func(org string) {
-				defer wg.Done()
-				id, err := m.VMAccountID(ctx, org)
-				if err != nil {
-					t.Errorf("VMAccountID: %v", err)
-					return
-				}
-				mu.Lock()
-				defer mu.Unlock()
-				if prev, ok := seen[org]; ok && prev != id {
-					t.Errorf("org %s got both %d and %d", org, prev, id)
-				}
-				seen[org] = id
-			}(org)
-		}
-	}
-	wg.Wait()
-
-	byID := map[uint32]string{}
-	for org, id := range seen {
-		if other, dup := byID[id]; dup {
-			t.Errorf("AccountID %d shared by %s and %s", id, org, other)
-		}
-		byID[id] = org
-	}
-}
-
-func TestScopeOrgIDIsTheOrgUUID(t *testing.T) {
-	got, err := NewMemoryMapper().ScopeOrgID(context.Background(), orgA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != orgA {
-		t.Errorf("ScopeOrgID = %q, want %q", got, orgA)
-	}
-}
-
+// A malformed org must be rejected before any SQL is attempted, which is why a
+// nil *db.DB is enough to prove it: reaching the database would panic.
 func TestMappersRejectMalformedOrg(t *testing.T) {
 	ctx := context.Background()
 	bad := []string{"", "org-a", "x' OR 1=1--"}
-	for _, m := range []Mapper{NewMemoryMapper(), NewStaticMapper(map[string]uint32{orgA: 1})} {
+	mappers := []Mapper{NewPGMapper(nil), NewStaticMapper(map[string]uint32{orgA: 1})}
+	for _, m := range mappers {
 		for _, s := range bad {
 			if _, err := m.VMAccountID(ctx, s); !errors.Is(err, ErrInvalidOrg) {
 				t.Errorf("%T VMAccountID(%q) = %v, want ErrInvalidOrg", m, s, err)
@@ -115,6 +29,67 @@ func TestMappersRejectMalformedOrg(t *testing.T) {
 			}
 		}
 	}
+}
+
+// The mapping is immutable once assigned, so a cached hit must never reach the
+// database again. A nil pool makes that observable: a cache miss would panic.
+func TestPGMapperServesRememberedAssignmentsWithoutTheDatabase(t *testing.T) {
+	ctx := context.Background()
+	m := NewPGMapper(nil)
+	m.Remember(orgA, 7)
+
+	id, err := m.VMAccountID(ctx, orgA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != 7 {
+		t.Fatalf("VMAccountID = %d, want 7", id)
+	}
+	scope, err := m.ScopeOrgID(ctx, orgA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scope != orgA {
+		t.Errorf("ScopeOrgID = %q, want the org uuid", scope)
+	}
+}
+
+// AccountID 0 is the VictoriaMetrics default account. Caching it would pin an
+// org into the shared bucket, so a zero is refused rather than remembered.
+func TestPGMapperNeverCachesAccountZero(t *testing.T) {
+	m := NewPGMapper(nil)
+	m.Remember(orgA, 0)
+	if _, ok := m.cached(orgA); ok {
+		t.Error("AccountID 0 was cached")
+	}
+}
+
+func TestPGMapperCacheIsRaceFree(t *testing.T) {
+	ctx := context.Background()
+	m := NewPGMapper(nil)
+	orgs := map[string]uint32{orgA: 1, orgB: 2, orgC: 3}
+	for org, id := range orgs {
+		m.Remember(org, id)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		for org, want := range orgs {
+			wg.Add(1)
+			go func(org string, want uint32) {
+				defer wg.Done()
+				got, err := m.VMAccountID(ctx, org)
+				if err != nil {
+					t.Errorf("VMAccountID(%s): %v", org, err)
+					return
+				}
+				if got != want {
+					t.Errorf("org %s = %d, want %d", org, got, want)
+				}
+			}(org, want)
+		}
+	}
+	wg.Wait()
 }
 
 func TestStaticMapperRefusesUnknownOrg(t *testing.T) {
@@ -130,6 +105,16 @@ func TestStaticMapperRefusesUnknownOrg(t *testing.T) {
 	}
 	if _, err := m.ScopeOrgID(ctx, orgB); !errors.Is(err, ErrNotMapped) {
 		t.Errorf("unknown org ScopeOrgID: %v, want ErrNotMapped", err)
+	}
+}
+
+func TestStaticMapperScopeOrgIDIsTheOrgUUID(t *testing.T) {
+	got, err := NewStaticMapper(map[string]uint32{orgA: 1}).ScopeOrgID(context.Background(), orgA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != orgA {
+		t.Errorf("ScopeOrgID = %q, want %q", got, orgA)
 	}
 }
 

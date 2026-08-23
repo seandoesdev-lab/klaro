@@ -33,11 +33,40 @@ func MigrationFiles(fsys fs.FS) ([]string, error) {
 	return names, nil
 }
 
+// migrateLockID namespaces the advisory lock that serialises migration runs.
+//
+// Two processes applying the schema at once is not hypothetical: obsplane
+// migrates on boot, so a rolling restart of two replicas does it, and so does
+// running the integration suites of two packages in parallel. Without the lock
+// they interleave into "type already exists" and duplicate-key errors, because
+// each one reads schema_migrations before the other has committed its row.
+const migrateLockID int64 = 0x6b6c61726f5f6f62 // "klaro_ob"
+
 // Migrate applies every not-yet-recorded migration and returns the ones it ran.
 //
 // This needs DDL and CREATE ROLE rights, so it runs on an admin pool - not the
 // NOSUPERUSER application pool that serves requests.
+//
+// A session-level advisory lock is held for the whole run: whoever gets there
+// second waits, then finds the work already recorded and applies nothing.
 func Migrate(ctx context.Context, pool *pgxpool.Pool, fsys fs.FS) ([]string, error) {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire migration connection: %w", err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrateLockID); err != nil {
+		return nil, fmt.Errorf("acquire migration lock: %w", err)
+	}
+	defer func() {
+		// Best effort: releasing the pooled connection would drop the lock anyway.
+		_, _ = conn.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock($1)`, migrateLockID)
+	}()
+
+	return migrateLocked(ctx, pool, fsys)
+}
+
+func migrateLocked(ctx context.Context, pool *pgxpool.Pool, fsys fs.FS) ([]string, error) {
 	if _, err := pool.Exec(ctx, migrationsTableDDL); err != nil {
 		return nil, fmt.Errorf("create schema_migrations: %w", err)
 	}

@@ -1,19 +1,22 @@
 // Package api wires the obsplane HTTP surface.
 //
-// Only the foundation slice exists here: liveness, readiness, and the
-// org-scoped group that every future handler (ingestkey, explorer, alerting,
-// dashboards, live) hangs off. Mounting that group now fixes the middleware
-// order - authenticate, match :orgId, then run inside a tenant transaction -
-// so no later handler can accidentally sit outside it.
+// It carries the org-scoped group that every handler hangs off, which fixes the
+// middleware order once - authenticate, match :orgId, then run inside a tenant
+// transaction - so no later handler can accidentally sit outside it. Mounted so
+// far: health, the tenant probe and observability keys/quota [OBS-02]. Explorer,
+// alerting, dashboards and the live WebSocket are later build-order steps.
 package api
 
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/klaro/observability/internal/ingestkey"
+	"github.com/klaro/observability/internal/platform/audit"
 	"github.com/klaro/observability/internal/platform/db"
 	"github.com/klaro/observability/internal/platform/httpx"
 	"github.com/klaro/observability/internal/platform/redisx"
@@ -27,6 +30,16 @@ type Deps struct {
 	Signal  redisx.Signaler
 	Tenants tenants.Mapper
 	Auth    tenancy.Authenticator
+	Keys    *ingestkey.Store
+	Authz   *ingestkey.Authorizer
+	Audit   audit.Recorder
+
+	// RotationGrace is how long a rotated key keeps working alongside its
+	// replacement (design HOW-4).
+	RotationGrace time.Duration
+	// ActiveHostWindow is how recently a host must have reported to count
+	// against the host quota.
+	ActiveHostWindow time.Duration
 }
 
 // NewRouter builds the public engine.
@@ -59,6 +72,13 @@ func NewRouter(d Deps) *gin.Engine {
 	org := r.Group("/orgs/:orgId", tenancy.Middleware(d.Auth))
 	{
 		org.GET("/obs/tenant", d.getTenant)
+
+		// Observability keys and the quota they are metered against [OBS-02].
+		org.POST("/obs/keys", d.postKey)
+		org.GET("/obs/keys", d.listKeys)
+		org.POST("/obs/keys/:keyId/rotate", d.rotateKey)
+		org.DELETE("/obs/keys/:keyId", d.deleteKey)
+		org.GET("/obs/quota", d.getQuota)
 	}
 	return r
 }
