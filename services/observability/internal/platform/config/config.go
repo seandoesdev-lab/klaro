@@ -125,6 +125,14 @@ type Config struct {
 	// AutoMigrate applies migrations/*.sql on boot (dev convenience).
 	AutoMigrate bool
 
+	// DevCORSOrigins are the browser origins allowed to call the public API
+	// cross-origin (api.DevCORS). It exists so the Next dashboard on
+	// localhost:3100 can talk to obsplane on localhost:8090 during local
+	// development; the production profile refuses it, because a production
+	// dashboard is served same-origin or behind a gateway that owns its own
+	// policy. Empty means no CORS middleware is mounted at all.
+	DevCORSOrigins []string
+
 	// ActiveHostWindow is how recently observability_hosts.last_seen_at must be
 	// for a host to count against the host quota.
 	ActiveHostWindow time.Duration
@@ -210,6 +218,7 @@ func Load(getenv func(string) string) (Config, error) {
 		InternalAddr:       str(getenv, "OBS_INTERNAL_ADDR", ":8443"),
 		AutoMigrate:        boolean(getenv, "OBS_AUTO_MIGRATE", true),
 		InternalInsecure:   boolean(getenv, "OBS_INTERNAL_INSECURE", false),
+		DevCORSOrigins:     csv(getenv("OBS_DEV_CORS_ORIGINS")),
 		InternalToken:      getenv("OBS_INTERNAL_TOKEN"),
 		VMSelectURL:        getenv("OBS_VMSELECT_URL"),
 		TempoURL:           getenv("OBS_TEMPO_URL"),
@@ -291,6 +300,7 @@ func Load(getenv func(string) string) (Config, error) {
 		errs = append(errs, "OBS_TLS_CA_FILE, OBS_TLS_CERT_FILE and OBS_TLS_KEY_FILE must be set together")
 	}
 	errs = append(errs, validateInternalPlane(c, env)...)
+	errs = append(errs, validateDevCORS(c, env)...)
 
 	if len(errs) > 0 {
 		return Config{}, fmt.Errorf("%w: %s", ErrInvalid, strings.Join(errs, "; "))
@@ -476,6 +486,48 @@ func validateInternalPlane(c Config, env Environment) []string {
 			minInternalToken, len(c.InternalToken)))
 	}
 	return errs
+}
+
+// validateDevCORS checks the cross-origin allowlist.
+//
+// Production refuses it outright rather than validating it more strictly: the
+// only reason obsplane needs a CORS policy of its own is a dashboard served
+// from a different port on the same laptop. In production that is a gateway's
+// job, and an allowlist configured here would be a second place for an origin
+// policy to be wrong.
+func validateDevCORS(c Config, env Environment) []string {
+	if len(c.DevCORSOrigins) == 0 {
+		return nil
+	}
+	if env.IsProduction() {
+		return []string{"OBS_DEV_CORS_ORIGINS must not be set in the production profile; " +
+			"serve the dashboard same-origin or terminate CORS at the gateway"}
+	}
+	var errs []string
+	for _, o := range c.DevCORSOrigins {
+		// An Origin is scheme://host[:port] and nothing else. A trailing slash
+		// or a path never equals what a browser sends, so it would be an
+		// allowlist entry that silently matches nothing.
+		u, err := url.Parse(o)
+		switch {
+		case err != nil || u.Scheme == "" || u.Host == "":
+			errs = append(errs, fmt.Sprintf("OBS_DEV_CORS_ORIGINS entry %q must be scheme://host[:port]", o))
+		case u.Path != "" || u.RawQuery != "" || u.Fragment != "":
+			errs = append(errs, fmt.Sprintf("OBS_DEV_CORS_ORIGINS entry %q must have no path, query or fragment", o))
+		}
+	}
+	return errs
+}
+
+// csv splits a comma-separated list, dropping empties and surrounding space.
+func csv(v string) []string {
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // sslMode extracts sslmode from a DSN, returning "" when it is absent.

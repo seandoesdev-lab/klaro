@@ -43,6 +43,11 @@ type Deps struct {
 	RuleSync   *alerting.Syncer
 	Dashboards *dashboards.Store
 
+	// DevCORSOrigins are the browser origins allowed to call this API
+	// cross-origin. Empty mounts no CORS middleware; the production profile
+	// refuses to set it (config.validateDevCORS).
+	DevCORSOrigins []string
+
 	// RotationGrace is how long a rotated key keeps working alongside its
 	// replacement (design HOW-4).
 	RotationGrace time.Duration
@@ -56,6 +61,15 @@ func NewRouter(d Deps) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
+
+	// Cross-origin support for a locally served dashboard, when configured. It
+	// is mounted at the engine level rather than on the org group so that a
+	// preflight - which carries no credential by specification - is answered
+	// before the tenancy middleware can 401 it, and so that a preflight for an
+	// unrouted path still gets an answer instead of a bare 404.
+	if cors := DevCORS(d.DevCORSOrigins); cors != nil {
+		r.Use(cors)
+	}
 
 	// Liveness: process is up. No dependencies, so a database blip does not
 	// get the container killed.

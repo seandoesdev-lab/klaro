@@ -61,6 +61,12 @@ var upgrader = websocket.Upgrader{
 // distinction; it calls the same tenancy.Resolve the middleware uses, so the
 // two cannot drift apart.
 func (d Deps) getLive(c *gin.Context) {
+	// A browser cannot put an Authorization header on a WebSocket handshake, so
+	// this one route also accepts the token from the subprotocol list. The
+	// permission is granted per request rather than globally: every REST route
+	// keeps reading the header and nothing else (tenancy.BearerToken).
+	tenancy.AllowWSSubprotocolCredential(c)
+
 	principal, outcome := tenancy.Resolve(c, d.Auth)
 	switch outcome {
 	case tenancy.OutcomeOK:
@@ -102,7 +108,7 @@ func (d Deps) getLive(c *gin.Context) {
 	}
 	defer unsubscribe()
 
-	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	conn, err := upgradeLive(c)
 	if err != nil {
 		return // Upgrade already wrote its own error
 	}
@@ -111,11 +117,31 @@ func (d Deps) getLive(c *gin.Context) {
 	pump(ctx, conn, frames)
 }
 
+// upgradeLive completes the handshake, echoing the selected subprotocol.
+//
+// The echo is not optional. RFC 6455 section 4.2.2 requires the server to name
+// the subprotocol it chose, and a browser that offered one and is answered with
+// none fails the connection - so a client sending its credential as
+// "klaro-bearer, <token>" would authenticate successfully and then be
+// disconnected, which looks exactly like a broken server.
+//
+// Only the marker is echoed, never the token that follows it. The server has to
+// select one of the offered values, and "klaro-bearer" is the one that names the
+// scheme; sending the credential back would copy it into a response header for
+// no benefit.
+func upgradeLive(c *gin.Context) (*websocket.Conn, error) {
+	var header http.Header
+	if tenancy.OffersBearerSubprotocol(c.Request) {
+		header = http.Header{"Sec-Websocket-Protocol": []string{tenancy.BearerSubprotocol}}
+	}
+	return upgrader.Upgrade(c.Writer, c.Request, header)
+}
+
 // closeWith upgrades only to deliver a close code. The socket carries no data
 // and is shut immediately; the upgrade exists purely so the client can read the
 // reason, which a rejected handshake would not let it do.
 func closeWith(c *gin.Context, code int, reason string) {
-	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	conn, err := upgradeLive(c)
 	if err != nil {
 		// Not a WebSocket request after all - answer as the REST surface would.
 		httpx.Forbidden(c, reason)

@@ -51,17 +51,31 @@ type AuthenticatorFunc func(c *gin.Context) (Principal, bool)
 // Authenticate implements Authenticator.
 func (f AuthenticatorFunc) Authenticate(c *gin.Context) (Principal, bool) { return f(c) }
 
-// BearerToken returns the token from an Authorization: Bearer header.
+// BearerToken returns the caller's bearer token.
 //
-// Anything else - Basic, a bare token, an empty value after the scheme - is not
-// a bearer credential and is refused rather than guessed at.
+// The Authorization header is the only source on every route. Anything else
+// there - Basic, a bare token, an empty value after the scheme - is not a
+// bearer credential and is refused rather than guessed at.
+//
+// One route widens that: a handler that called AllowWSSubprotocolCredential
+// also accepts the token from the WebSocket handshake's subprotocol list,
+// because a browser cannot put a header on a handshake at all (see
+// wscredential.go). The header is still tried first, so a non-browser client
+// keeps working unchanged and the widening cannot shadow it.
 func BearerToken(c *gin.Context) (string, bool) {
-	token, found := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")
-	if !found {
+	if token, found := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer "); found {
+		token = strings.TrimSpace(token)
+		if token != "" {
+			return token, true
+		}
+		// An empty Authorization: Bearer is a broken client, not an invitation
+		// to go looking for the credential somewhere else.
 		return "", false
 	}
-	token = strings.TrimSpace(token)
-	return token, token != ""
+	if wsSubprotocolAllowed(c) {
+		return SubprotocolToken(c.Request)
+	}
+	return "", false
 }
 
 // DevTokenAuthenticator accepts one bearer token and pins it to one org and
