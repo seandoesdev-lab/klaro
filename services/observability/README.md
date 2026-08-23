@@ -1,4 +1,4 @@
-# klaro 상시 관측 플랫폼 (S3) — 수집·라이브·조회 경로
+# klaro 상시 관측 플랫폼 (S3) — 수집·라이브·조회·알림·과금
 
 **최종 목표: Datadog 유사 상시 관측 제품.** 배포 적합성 리포트(S4)는 이 플랫폼의 데이터를
 "특정 구간 스냅샷"으로 소비하는 하나의 소비자일 뿐이다.
@@ -8,7 +8,7 @@
 
 ## 이 저장소 조각의 범위
 
-설계 §6 빌드순서 **1~6단계**가 구현되어 있다.
+설계 §6 빌드순서 **1~9단계**가 구현되어 있다.
 
 | 단계 | 내용 | 상태 |
 |------|------|------|
@@ -18,7 +18,10 @@
 | 4 | OTel Collector 게이트웨이(authz 확장 + 테넌트 라우팅 + 라이브 복제) | ✅ |
 | 5 | live + WS fan-out(org+stream 허브, ≤2초) (OBS-01/APM-02) | ✅ |
 | 6 | explorer(metrics/traces/logs 얇은 프록시, 서버사이드 org 강제) (OBS-03/04/05) | ✅ |
-| 7~12 | alerting · retentionjob · usage · dashboards · snapshot | 미착수 |
+| 7 | alerting(룰 CRUD · vmalert 룰그룹 렌더/sync · webhook→이벤트 · Notifier) (OBS-06/07) | ✅ |
+| 8 | retention + 다운샘플링(플랜별 보존 집행 · 5m/1h 롤업 · explorer 폴백) (OBS-08) | ✅ |
+| 9 | usage 발행(호스트수 + 수집GB → klaro.usage.emitted) (BILL-03) | ✅ |
+| 10~12 | dashboards · snapshot 어댑터 · 통합 E2E | 미착수 |
 
 `services/load-test/`의 project 단위 APM 경로(`apm_agents`, `apm_spans`, `apm_logs`)는
 **리포트 스냅샷 경로로 존치**한다. 대체가 아니라 공존이다(설계 §0·§4.6).
@@ -70,7 +73,11 @@ cmd/obsplane/            상시 관측 Control Plane 엔트리(공개 리스너 
 internal/api/            Gin 라우터 · org 스코프 그룹 · 키/쿼터 핸들러 · 내부 플레인
 internal/ingestkey/      OBS-02 관측 키: 발급·로테이션(grace)·폐기·해석·쿼터 스냅샷
 internal/live/           라이브 프레임 정의 + org＋stream 팬아웃 허브(OBS-01)
-internal/explorer/       metrics/traces/logs 조회 프록시 — 쿼리 조립·org 강제(OBS-03/04/05)
+internal/explorer/       metrics/traces/logs 조회 프록시 — 쿼리 조립·org 강제·보존 클램프·롤업 폴백
+internal/alerting/       룰 CRUD · vmalert 룰그룹 렌더/sync · webhook 수신 · Notifier(OBS-06/07)
+internal/retention/      플랜별 보존 집행 잡(OBS-08)
+internal/usage/          계량 수집 + klaro.usage.emitted 발행(BILL-03)
+internal/plans/          org→플랜 보존/쿼터 조회(한 곳에서만 읽는다)
 internal/platform/
   config/                환경변수 로딩 + 검증
   db/                    pgx 풀 · WithOrg(RLS 세션) · 마이그레이션 러너(advisory lock)
@@ -168,6 +175,106 @@ DDL과 `CREATE ROLE`은 앱 롤 권한 밖이므로 **마이그레이션은 별�
 - 백엔드 장애는 502(`telemetry backend unavailable`)다. 업스트림 본문은 절대 전달하지
   않는다 — 다른 테넌트의 라벨명이나 내부 호스트명이 실려 올 수 있다.
 
+## 알림 (OBS-06/07)
+
+| 메서드 | 경로 |
+|---|---|
+| POST · GET | `/orgs/:orgId/obs/alert-rules` |
+| GET · PATCH · DELETE | `/orgs/:orgId/obs/alert-rules/:ruleId` |
+| GET | `/orgs/:orgId/obs/alert-events` — `state` · `rule_id` · `from`/`to` · `limit` |
+
+룰도 **raw 쿼리를 받지 않는다.** explorer와 같은 구조화 파라미터(`query_spec`)만 받고
+서버가 org 매처를 주입해 MetricsQL로 렌더한다 — raw 식을 받으면 explorer에서 막아둔
+구멍이 알림 경로로 되돌아온다. 렌더 결과는 응답의 `query`로 확인할 수 있다.
+
+- **MVP는 `metric` 신호만.** vmalert가 메트릭 전용이므로 `log`/`trace`는 422다.
+  컬럼은 미리 있지만, 저장해두면 "조용히 절대 발동하지 않는 룰"이 되므로 거부한다.
+- `comparator`는 `gt`/`gte`/`lt`/`lte`, `severity`는 `info`/`warning`/`critical`.
+- `for_duration_sec: 0`은 "첫 위반에 즉시 발동"이다(기본값은 60초).
+- 이벤트는 (룰, 라벨셋) 지문으로 **중복 제거**된다. vmalert는 발동 중인 알림을
+  재전송 주기마다 다시 보내므로, 없으면 문제가 지속되는 동안 1분에 한 행씩 쌓인다.
+- 알림 페이로드는 `klaro.obs.alert`로 발행되고 Notifier가 구독해 전달한다(MailHog/Slack).
+  발송을 요청 경로에서 하지 않는 이유: 느린 SMTP가 vmalert를 붙잡으면 안 된다.
+- 룰 lifecycle은 `audit_logs`에 `obs.rule.*`로, 변경과 같은 트랜잭션에서 기록된다.
+
+### vmalert 멀티테넌시 (스파이크 결과)
+
+v1.150.0 OSS vmalert에는 **`-clusterMode`도 룰그룹 `tenant:` 필드도 없다**(전체 `-help`에서
+tenant 언급은 경로 템플릿 예시뿐). 즉 인스턴스 하나가 네이티브로 테넌트별 격리 평가를
+하지 못한다. 그렇다고 org마다 인스턴스를 띄울 필요는 없었다 — 스파이크로 확인한 구성은:
+
+```
+단일 vmalert
+  -datasource.url   = …/select/multitenant/prometheus   (읽기)
+  -remoteWrite.url  = …/insert/multitenant/prometheus   (쓰기)
+룰그룹 = org당 하나, CP가 렌더
+  expr   에 klaro_org_id 매처 강제 주입   → 읽기 격리
+  labels 에 vm_account_id                → 쓰기 격리(org 테넌트로 라우팅)
+```
+
+2개 org로 실측: tenant 1 롤업 = 10(orgA만), tenant 2 = 99(orgB만), 두 룰 `health=ok`.
+격리는 웨이브2~3에서 이미 쓰던 두 층 그대로 성립하고 컨테이너는 하나로 끝난다.
+
+룰 파일은 **JSON으로 쓰고 확장자만 `.yaml`**이다. YAML은 JSON의 상위집합이라 vmalert가
+그대로 파싱하고, 표준 라이브러리가 이스케이프를 처리한다. 고객 라벨 문자열이 들어가는
+값에 YAML 인용을 손으로 붙이는 코드는 프로덕션에서만 파스 에러를 낸다.
+
+## 보존과 다운샘플링 (OBS-08)
+
+보존은 **층으로** 집행한다. 백엔드 셋 중 시간범위 삭제가 가능한 건 하나뿐이기 때문이다.
+
+| 층 | 무엇을 | 왜 |
+|---|---|---|
+| explorer 창 클램프 | 모든 조회를 플랜 창으로 좁힌다 | 계약이 요구하는 "플랜 초과 데이터 조회 불가"를 **정확·즉시** 성립시킨다 |
+| Loki delete API | org별 시간범위 삭제 | 시간범위 삭제가 가능한 유일한 백엔드 |
+| VM `delete_series` | **완전히 만료된 org**의 시리즈 삭제 | VM은 시간범위 삭제가 없다. 여전히 보내는 org는 건드리지 않고, 클러스터 전역 리텐션(최대 플랜)으로 늙힌다 |
+| Tempo | 전역 `block_retention`만 | per-tenant delete API가 없다. 호출할 것이 없으므로 그렇다고 로그로 말한다 |
+
+위 셋의 빈틈은 OSS 백엔드의 실제 제약이고 미완성 의도가 아니다. 고객 약속을 지키는
+층은 explorer 클램프다.
+
+**다운샘플링**(HOW-10)은 vmalert recording rule로 만든다. `klaro_rollup5m`과
+`klaro_rollup1h` 두 시리즈이고, 원래 메트릭 이름은 `klaro_metric` 라벨에 담긴다 —
+recording rule이 `__name__`을 롤업 이름으로 덮어쓰기 때문에 이름을 라벨에 옮겨두지
+않으면 잃는다. 카디널리티는 raw와 같다. 1h는 5m에서 파생한다(raw 1시간을 다시 읽는 건
+같은 답에 12배의 일이다). 5m 룰은 `__name__!~"klaro_rollup…"`로 **자기 출력을 제외**한다 —
+없으면 매 주기 자기 롤업을 다시 롤업해 시리즈가 무한히 늘어난다.
+
+explorer는 요청 창이 raw 보존을 넘으면 자동으로 롤업으로 폴백하고, 응답에
+`resolution: raw|5m|1h`과 `clamped`을 실어 보낸다. 저해상도를 raw인 것처럼 주면
+성긴 버킷이 "조용한 시스템"처럼 보인다.
+
+**트레이스/로그는 다운샘플링 대상이 아니다.** OSS 생태계에 표준 개념이 없고, 있는 척하면
+백엔드가 지킬 수 없는 기대를 만든다. 두 신호는 리텐션만 적용한다.
+
+## 과금 계량 (BILL-03)
+
+미터 2축(HOW-6): **활성 호스트수**(플랜 가격의 기준)와 **월 수집 GB**(보조 가드).
+
+```
+[게이트웨이 klarousage 프로세서]  신호별 바이트·건수 + host_ident 집계
+   │  POST /internal/usage (내부 플레인)
+   ▼
+[obsplane]  observability_hosts upsert + observability_usage_rollups 누적
+   │  주기 emitter
+   ▼
+klaro.usage.emitted  {org_id, meter, quantity(증분), period, computation}
+```
+
+- 계량이 **게이트웨이**에 있는 이유: 세 신호가 모두 지나는 유일한 지점이다. 메트릭만
+  CP로 복제되고 트레이스·로그는 저장소로 직행하므로, CP에서 세면 셋 중 하나만 센다.
+- 바이트는 **OTLP protobuf 크기**다. 고객이 실제로 보낸 양이고, 클라이언트가 어떤 압축을
+  켰는지에 좌우되지 않는다.
+- 발행은 **증분**이고 `observability_usage_emissions` 원장이 멱등성 키다. 재시작·크론
+  겹침·중복 실행이 모두 같은 델타를 계산하거나 아무것도 발행하지 않는다. 청구에서는
+  두 번 하는 것이 안 하는 것보다 나쁘다.
+- 호스트 미터도 증분이다 — 최고수위(max)의 증가분을 싣기 때문에 Billing이 더하면
+  그 달의 peak가 된다.
+- **쿼터 초과는 아무것도 막지 않는다**(§7-1 사용자 확정). 계량이 초과를 청구 항목으로
+  바꾸는 것이고, 트레이스를 버리는 것이 아니다.
+- `observability_hosts`를 쓰는 주체가 생긴 것도 이 단계다. 그전까지 활성 호스트 카운트는
+  빈 테이블을 읽어 모든 org가 유휴로 보였다.
+
 ## 환경변수
 
 | 변수 | 기본값 | 비고 |
@@ -190,6 +297,15 @@ DDL과 `CREATE ROLE`은 앱 롤 권한 밖이므로 **마이그레이션은 별�
 | `OBS_LOKI_URL` | — | Explorer 로그 백엔드 |
 | `OBS_EXPLORER_TIMEOUT_SEC` | `30` | 백엔드 질의 1건 상한 |
 | `OBS_EXPLORER_MAX_ROWS` | `1000` | 질의당 행 상한(보존창 전체를 메모리로 끌어오지 못하게) |
+| `OBS_RULE_FILE` | — | vmalert가 읽는 룰 파일. 비면 룰 sync를 끈다 |
+| `OBS_VMALERT_RELOAD_URL` | — | 즉시 reload. 비면 vmalert 자체 폴링에 맡긴다 |
+| `OBS_RULE_SYNC_INTERVAL_SEC` | `60` | 룰 파일 전체 재렌더 주기 |
+| `OBS_DASHBOARD_BASE_URL` | — | 알림에 실리는 링크 접두사 |
+| `OBS_SMTP_ADDR` / `OBS_SMTP_FROM` | — / `alerts@klaro.local` | 개발은 MailHog. 인증 없음 |
+| `OBS_SLACK_WEBHOOK_URL` | — | 비면 로그 no-op으로 폴백(다른 채널을 막지 않는다) |
+| `OBS_RETENTION_INTERVAL_SEC` | `21600` | 보존 집행 주기 |
+| `OBS_RETENTION_DRY_RUN` | `false` | 삭제 없이 로그만. 새 환경 첫 실행에 쓴다 |
+| `OBS_USAGE_INTERVAL_SEC` | `3600` | 과금 미터 발행 주기 |
 | `OBS_DEV_TOKEN` / `OBS_DEV_ORG_ID` | — | 개발 인증 스텁(S1과 동일 형태) |
 
 TLS 번들도 없고 `OBS_INTERNAL_INSECURE`도 아니면 내부 리스너는 **뜨지 않는다**(로그로 알린다).
@@ -246,6 +362,9 @@ MSYS_NO_PATHCONV=1 docker run --rm --network deploy_default -v "$(pwd -W):/src" 
   -e E2E_OBSPLANE_URL=http://obsplane:8090 \
   -e E2E_OTLP_URL=http://otel-collector:4318 \
   -e E2E_VMSELECT_URL=http://vmselect:8481 \
+  -e E2E_MAILHOG_URL=http://mailhog:8025 \
+  -e E2E_REDIS_ADDR=redis:6379 \
+  -e E2E_ROLLUPS=1 \
   -e E2E_ORG_ID=00000000-0000-0000-0000-000000000001 \
   -e E2E_DEV_TOKEN=dev -e E2E_OBS_KEY="<발급한 secret>" \
   golang:1.25 go test -tags e2e -count=1 -timeout 10m -v -run TestE2E ./internal/api/
@@ -254,7 +373,10 @@ MSYS_NO_PATHCONV=1 docker run --rm --network deploy_default -v "$(pwd -W):/src" 
 검증 항목: 라이브 소켓이 수집 직후 프레임을 받음(내부 라벨 미노출) · 메트릭/트레이스/로그가
 Explorer로 되읽힘 · 생성된 쿼리에 org 매처가 붙어 있음 · 워터폴에 위치와 폭이 있음 ·
 크로스테넌트 조회 403 · 예약 라벨 필터 422 · **메트릭이 VictoriaMetrics 기본 계정(0)으로
-새지 않음**.
+새지 않음** · 룰 생성→vmalert 발동→alert_event 기록(값 포함, 라우팅 라벨 미노출, 재전송
+dedup으로 열린 이벤트 1건) · 알림이 MailHog 도착 · 롤업 시리즈 생성과 Explorer 폴백
+(resolution이 raw가 아니고 org 매처 유지) · 보존 창 안에서는 raw 유지 · 게이트웨이 계량이
+쿼터에 반영되고 klaro.usage.emitted가 발행됨.
 
 마지막 항목은 제품 표면에서는 보이지 않는 불변식이라 vmselect를 직접 본다(Explorer는
 호출자 자신의 테넌트만 조회할 수 있고, 그게 바로 이 유출을 아무도 눈치채지 못하는
@@ -276,7 +398,7 @@ ORG=00000000-0000-0000-0000-000000000001
 
 # 개발 스텁 org는 시드되어 있지 않다.
 docker compose exec -T postgres psql -U klaro -d klaro_obs \
-  -c "INSERT INTO organizations (id,name,plan_code) VALUES ('$ORG','dev','free') ON CONFLICT DO NOTHING"
+  -c "INSERT INTO organizations (id,name,plan_code) VALUES ('$ORG','dev','pro') ON CONFLICT (id) DO UPDATE SET plan_code='pro'"
 
 # 키 발급 — secret은 이 응답에만 있다.
 curl -s -X POST localhost:8090/orgs/$ORG/obs/keys -H 'Authorization: Bearer dev' \
@@ -313,6 +435,10 @@ klaro 컨트롤 플레인에 OTLP를 인증시키는 컴포넌트가 upstream에
   저장소로 흘려보낼 수 없다. 캐시 키도 시크릿이 아니라 그 다이제스트다.
   컨트롤 플레인 장애(5xx)는 "키가 나쁘다"로 캐시하지 않는다 — 장애 중 정상 텔레메트리를
   버리면 안 되기 때문이다.
+- `klarousage` (processor) — org별로 신호별 바이트·건수와 host_ident를 세어 주기적으로
+  CP `/internal/usage`에 보고한다. 데이터를 건드리지 않고 세기만 한다. 실패한 보고는
+  재시도하지 않는다 — 다시 큐에 넣으면 고객 사용량을 두 번 셀 위험이 있고, 한 번의
+  과소 보고는 복구 가능하지만 과다 보고는 환불이다.
 - `klarotenant` (processor) — 그 테넌트를 리소스 속성으로 각인하고, 클라이언트가 보낸
   테넌트 속성은 덮어쓴다. 테넌트를 못 찾으면 배치를 **버린다**: 라벨 없는 메트릭은
   VictoriaMetrics 기본 계정(전 org 공용 버킷)으로 들어가므로, 유실보다 나쁜 결과가 된다.
@@ -348,6 +474,9 @@ Tempo/Loki는 `otlp`/`otlphttp` 익스포터가 컨텍스트를 유지하므로 
 - **`stream=service`는 발행자가 없다.** 채널과 구독 경로는 있지만 아직 아무도 쓰지 않는다.
 - **Explorer는 구조화 파라미터만** 받는다. raw 쿼리 개방은 label-enforcement 프록시를
   앞단에 두는 별도 결정이다(설계 HOW-2 트레이드오프).
-- **알림·보존·과금 발행이 없다**(설계 §6 7~9단계). 데이터는 쌓이지만 룰 평가와 플랜별
-  삭제, 미터 발행은 아직 없다.
-- 리텐션은 각 백엔드의 전역 설정(최대 플랜 기준)만 걸려 있다. 플랜별 집행은 8단계 `retentionjob`.
+- **알림은 메트릭 전용**이다. vmalert가 메트릭만 평가한다. 로그/트레이스 알림은 소형
+  자체 폴러를 붙이는 별도 결정이다(HOW-1).
+- **보존의 물리 삭제에는 빈틈이 있다**: VM은 시간범위 삭제가 없어 완전 만료 org만
+  지우고, Tempo는 per-tenant delete API가 없다. 계약을 지키는 층은 explorer 클램프다.
+- **다운샘플링은 메트릭 전용**이다(트레이스/로그에는 표준 개념이 없다).
+- **대시보드(OBS-09)와 리포트 스냅샷 어댑터(OBS-10)가 없다**(설계 §6 10~11단계).

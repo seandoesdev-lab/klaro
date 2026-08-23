@@ -69,6 +69,15 @@ processors:
     # 기본 계정(모든 org 공용 버킷)으로 들어가므로, 유실보다 나쁜 결과가 된다.
     require_tenant: true
 
+  # ④ 과금 계량(BILL-03). 데이터를 건드리지 않고 세기만 한다 — 쿼터 초과는
+  #    차단이 아니라 청구 항목이다(§7-1).
+  klarousage:
+    endpoint: http://obsplane:8443/internal/usage
+    flush_interval: 15s
+    tls:
+      # 개발 compose 전용. 프로덕션은 klaroauth와 동일한 mTLS 번들로 교체한다.
+      insecure: true
+
   batch:
     # 라이브 대시보드 ≤2초(APM-02 / HOW-7)에 맞춘 플러시 주기.
     timeout: 2s
@@ -133,13 +142,13 @@ service:
   pipelines:
     metrics:
       receivers: [otlp]
-      processors: [memory_limiter, klarotenant, batch]
+      processors: [memory_limiter, klarotenant, klarousage, batch]
       exporters: [prometheus_remote_write/vm, otlp_http/live]
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, klarotenant, batch]
+      processors: [memory_limiter, klarotenant, klarousage, batch]
       exporters: [otlp_grpc/tempo]
     logs:
       receivers: [otlp]
-      processors: [memory_limiter, klarotenant, batch]
+      processors: [memory_limiter, klarotenant, klarousage, batch]
       exporters: [otlp_http/loki]

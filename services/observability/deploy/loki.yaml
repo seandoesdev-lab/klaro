@@ -32,6 +32,9 @@ limits_config:
   allow_structured_metadata: true
   # 개발 로컬 디스크 상한. 플랜별 보존은 CP retentionjob이 별도로 집행한다.
   retention_period: 24h
+  # retentionjob이 org별 시간범위 삭제를 요청할 수 있게 한다. 세 백엔드 중
+  # 시간범위 삭제가 가능한 건 Loki뿐이다.
+  deletion_mode: filter-and-delete
 
   # klaro.org_id를 스트림 라벨로 색인한다.
   #

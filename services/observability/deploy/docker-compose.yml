@@ -46,7 +46,17 @@ services:
       OBS_VMSELECT_URL: http://vmselect:8481
       OBS_TEMPO_URL: http://tempo:3200
       OBS_LOKI_URL: http://loki:3100
+      # 알림: CP가 룰 파일을 쓰고 vmalert가 읽는다(공유 볼륨).
+      OBS_RULE_FILE: /var/lib/klaro/rules/klaro.yaml
+      OBS_VMALERT_RELOAD_URL: http://vmalert:8880/-/reload
+      OBS_RULE_SYNC_INTERVAL_SEC: "15"
+      OBS_SMTP_ADDR: mailhog:1025
+      OBS_DASHBOARD_BASE_URL: http://localhost:3000
+      # 보존/과금 잡 주기. 개발에서는 짧게 돌려 관측 가능하게 한다.
+      OBS_RETENTION_INTERVAL_SEC: "3600"
+      OBS_USAGE_INTERVAL_SEC: "30"
     ports: ["8090:8090", "8443:8443"]
+    volumes: ["obs-rules:/var/lib/klaro/rules"]
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_started }
@@ -101,6 +111,39 @@ services:
     ports: ["8481:8481"]
     depends_on: [vmstorage]
 
+  # --- 알림: vmalert + MailHog ---------------------------------------------
+  #
+  # 스파이크 결론(웨이브4): vmalert v1.150 OSS에는 -clusterMode도 룰그룹 tenant:
+  # 필드도 없다. 그래서 org별 인스턴스를 띄우는 대신 인스턴스 하나 + 멀티테넌트
+  # datasource로 두고, 격리는 이미 검증된 두 층으로 세운다:
+  #   읽기 = CP가 렌더할 때 expr에 klaro_org_id 매처를 강제 주입
+  #   쓰기 = 룰 labels의 vm_account_id로 org 테넌트에 remote-write
+  # 실측으로 2개 org의 롤업 값이 섞이지 않음을 확인했다.
+  vmalert:
+    image: victoriametrics/vmalert:v1.150.0
+    command:
+      - "-datasource.url=http://vmselect:8481/select/multitenant/prometheus"
+      - "-remoteWrite.url=http://vminsert:8480/insert/multitenant/prometheus"
+      - "-remoteRead.url=http://vmselect:8481/select/multitenant/prometheus"
+      - "-rule=/etc/vmalert/rules/*.yaml"
+      - "-evaluationInterval=15s"
+      # notifier.url에 /api/v2/alerts가 붙는다. Alertmanager를 중간에 두지 않고
+      # CP가 그 API를 직접 받는다 — 같은 데이터를 전달만 하는 컨테이너를 하나
+      # 줄인다.
+      - "-notifier.url=http://obsplane:8443/internal/alerts"
+      - "-rule.resendDelay=1m"
+    volumes: ["obs-rules:/etc/vmalert/rules:ro"]
+    ports: ["8880:8880"]
+    # 첫 기동 때 obsplane이 룰 파일을 쓰기 전이면 vmalert가 먼저 죽는다.
+    # 재시작으로 넘긴다(개발 편의).
+    restart: unless-stopped
+    depends_on:
+      obsplane: { condition: service_started }
+
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    ports: ["1025:1025", "8025:8025"]
+
   # --- 트레이스 / 로그 ------------------------------------------------------
   tempo:
     image: grafana/tempo:2.9.0
@@ -121,6 +164,9 @@ services:
     ports: ["3100:3100"]
 
 volumes:
+  # CP가 쓰고 vmalert가 읽는 룰 파일. 원자적 교체(temp+rename)로 갱신하므로
+  # vmalert가 반쯤 쓰인 파일을 읽는 일은 없다.
+  obs-rules:
   vmstorage-data:
   tempo-data:
   loki-data:

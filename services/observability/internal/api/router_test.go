@@ -32,7 +32,7 @@ func deps() Deps {
 		Auth:    tenancy.DevTokenAuthenticator("dev", orgA),
 		// No backend URLs: the explorer handlers are reachable but every query
 		// reports an unconfigured backend, which is what the routing tests want.
-		Explorer: explorer.New(explorer.Config{}, tenants.NewStaticMapper(map[string]uint32{orgA: 1})),
+		Explorer: explorer.New(explorer.Config{}, tenants.NewStaticMapper(map[string]uint32{orgA: 1}), nil),
 		Live:     live.NewHub(redisx.NewMemory()),
 	}
 }

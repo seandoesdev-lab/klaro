@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/klaro/observability/internal/alerting"
 	"github.com/klaro/observability/internal/explorer"
 	"github.com/klaro/observability/internal/ingestkey"
 	"github.com/klaro/observability/internal/live"
@@ -37,6 +38,8 @@ type Deps struct {
 	Audit    audit.Recorder
 	Live     *live.Hub
 	Explorer *explorer.Client
+	Rules    *alerting.Store
+	RuleSync *alerting.Syncer
 
 	// RotationGrace is how long a rotated key keeps working alongside its
 	// replacement (design HOW-4).
@@ -97,6 +100,14 @@ func NewRouter(d Deps) *gin.Engine {
 		org.GET("/obs/traces", d.getTraces)
 		org.GET("/obs/traces/:traceId", d.getTrace)
 		org.GET("/obs/logs", d.getLogs)
+
+		// Alert rules and the history of what they fired [OBS-06/07].
+		org.POST("/obs/alert-rules", d.postAlertRule)
+		org.GET("/obs/alert-rules", d.listAlertRules)
+		org.GET("/obs/alert-rules/:ruleId", d.getAlertRule)
+		org.PATCH("/obs/alert-rules/:ruleId", d.patchAlertRule)
+		org.DELETE("/obs/alert-rules/:ruleId", d.deleteAlertRule)
+		org.GET("/obs/alert-events", d.listAlertEvents)
 	}
 	return r
 }

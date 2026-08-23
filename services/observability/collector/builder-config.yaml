@@ -35,6 +35,11 @@ processors:
   - gomod: github.com/klaro/observability/collector v0.0.0
     import: github.com/klaro/observability/collector/klarotenant
     name: klarotenant
+  # klarousage counts volume and host identities per org for billing. It sits at
+  # the gateway because that is the only place all three signals pass through.
+  - gomod: github.com/klaro/observability/collector v0.0.0
+    import: github.com/klaro/observability/collector/klarousage
+    name: klarousage
 
 exporters:
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/prometheusremotewriteexporter v0.159.0

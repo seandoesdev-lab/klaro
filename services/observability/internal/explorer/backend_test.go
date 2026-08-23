@@ -56,7 +56,7 @@ const vmBody = `{"status":"success","data":{"resultType":"matrix","result":[
 // there is no request parameter that can reach it.
 func TestQueryMetricsPinsTheTenantAndOrgMatcher(t *testing.T) {
 	srv, cap := fakeBackend(t, vmBody)
-	c := New(Config{VMSelectURL: srv.URL}, mapper())
+	c := New(Config{VMSelectURL: srv.URL}, mapper(), nil)
 
 	got, err := c.QueryMetrics(context.Background(), orgA, MetricsQuery{
 		Range: window(), Metric: "cpu",
@@ -96,7 +96,7 @@ func TestQueryMetricsPinsTheTenantAndOrgMatcher(t *testing.T) {
 // ever wrote", which is a way to fall over, not a query.
 func TestQueryMetricsRefusesUnboundedQueries(t *testing.T) {
 	srv, cap := fakeBackend(t, vmBody)
-	c := New(Config{VMSelectURL: srv.URL}, mapper())
+	c := New(Config{VMSelectURL: srv.URL}, mapper(), nil)
 
 	_, err := c.QueryMetrics(context.Background(), orgA, MetricsQuery{Range: window()})
 	if !errors.Is(err, ErrInvalidQuery) {
@@ -109,7 +109,7 @@ func TestQueryMetricsRefusesUnboundedQueries(t *testing.T) {
 
 func TestQueryMetricsRefusesTooManyPoints(t *testing.T) {
 	srv, _ := fakeBackend(t, vmBody)
-	c := New(Config{VMSelectURL: srv.URL}, mapper())
+	c := New(Config{VMSelectURL: srv.URL}, mapper(), nil)
 
 	wide := TimeRange{From: time.Unix(0, 0), To: time.Unix(90*24*3600, 0)}
 	_, err := c.QueryMetrics(context.Background(), orgA, MetricsQuery{
@@ -127,7 +127,7 @@ const tempoSearchBody = `{"traces":[
 // Tempo tenancy is the header, and the header comes from the mapper.
 func TestSearchTracesSendsTheScopeHeader(t *testing.T) {
 	srv, cap := fakeBackend(t, tempoSearchBody)
-	c := New(Config{TempoURL: srv.URL}, mapper())
+	c := New(Config{TempoURL: srv.URL}, mapper(), nil)
 
 	got, err := c.SearchTraces(context.Background(), orgA, TracesQuery{
 		Range: window(), Service: "checkout", MinDuration: 3 * time.Second,
@@ -153,7 +153,7 @@ func TestSearchTracesSendsTheScopeHeader(t *testing.T) {
 // A service name is caller input and must not be able to write TraceQL.
 func TestSearchTracesEscapesTheServiceName(t *testing.T) {
 	srv, cap := fakeBackend(t, `{"traces":[]}`)
-	c := New(Config{TempoURL: srv.URL}, mapper())
+	c := New(Config{TempoURL: srv.URL}, mapper(), nil)
 
 	attack := `checkout" || resource.service.name = "billing`
 	if _, err := c.SearchTraces(context.Background(), orgA, TracesQuery{Range: window(), Service: attack}); err != nil {
@@ -178,7 +178,7 @@ const tempoTraceBody = `{"batches":[
 // The waterfall needs start offsets, and it needs them in order.
 func TestGetTraceBuildsAnOrderedWaterfall(t *testing.T) {
 	srv, cap := fakeBackend(t, tempoTraceBody)
-	c := New(Config{TempoURL: srv.URL}, mapper())
+	c := New(Config{TempoURL: srv.URL}, mapper(), nil)
 
 	got, err := c.GetTrace(context.Background(), orgA, "5b8efff798038103d269b633813fc60c")
 	if err != nil {
@@ -213,7 +213,7 @@ func TestGetTraceBuildsAnOrderedWaterfall(t *testing.T) {
 // before it gets there.
 func TestGetTraceRejectsNonHexIDs(t *testing.T) {
 	srv, cap := fakeBackend(t, tempoTraceBody)
-	c := New(Config{TempoURL: srv.URL}, mapper())
+	c := New(Config{TempoURL: srv.URL}, mapper(), nil)
 
 	bad := []string{"", "short", "../../admin", "zzzzzzzzzzzzzzzz", "5b8efff798038103d269b633813fc60caa"}
 	for _, id := range bad {
@@ -230,7 +230,7 @@ func TestGetTraceRejectsNonHexIDs(t *testing.T) {
 // turns a cross-tenant read into a miss.
 func TestGetTraceReportsAnEmptyTraceAsNotFound(t *testing.T) {
 	srv, _ := fakeBackend(t, `{"batches":[]}`)
-	c := New(Config{TempoURL: srv.URL}, mapper())
+	c := New(Config{TempoURL: srv.URL}, mapper(), nil)
 
 	if _, err := c.GetTrace(context.Background(), orgA, "5b8efff798038103d269b633813fc60c"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("err = %v, want ErrNotFound", err)
@@ -243,7 +243,7 @@ const lokiBody = `{"status":"success","data":{"resultType":"streams","result":[
 
 func TestQueryLogsForcesTheOrgIntoBothLayers(t *testing.T) {
 	srv, cap := fakeBackend(t, lokiBody)
-	c := New(Config{LokiURL: srv.URL}, mapper())
+	c := New(Config{LokiURL: srv.URL}, mapper(), nil)
 
 	got, err := c.QueryLogs(context.Background(), orgA, LogsQuery{
 		Range:   window(),
@@ -291,7 +291,7 @@ func TestQueryLogsForcesTheOrgIntoBothLayers(t *testing.T) {
 // A full page has to be resumable, or a busy service's logs are untraversable.
 func TestQueryLogsPagesWhenTheLimitIsHit(t *testing.T) {
 	srv, _ := fakeBackend(t, lokiBody)
-	c := New(Config{LokiURL: srv.URL}, mapper())
+	c := New(Config{LokiURL: srv.URL}, mapper(), nil)
 
 	got, err := c.QueryLogs(context.Background(), orgA, LogsQuery{Range: window(), Limit: 2})
 	if err != nil {
@@ -304,7 +304,7 @@ func TestQueryLogsPagesWhenTheLimitIsHit(t *testing.T) {
 
 // A deployment without a backend must say so, not dial an empty URL.
 func TestUnconfiguredBackendsReportThemselves(t *testing.T) {
-	c := New(Config{}, mapper())
+	c := New(Config{}, mapper(), nil)
 	ctx := context.Background()
 
 	if _, err := c.QueryMetrics(ctx, orgA, MetricsQuery{Range: window(), Metric: "cpu"}); !errors.Is(err, ErrBackend) {
@@ -321,7 +321,7 @@ func TestUnconfiguredBackendsReportThemselves(t *testing.T) {
 // An org with no tenant assignment must not fall back to an unscoped query.
 func TestUnmappedOrgIsRefused(t *testing.T) {
 	srv, cap := fakeBackend(t, vmBody)
-	c := New(Config{VMSelectURL: srv.URL, TempoURL: srv.URL, LokiURL: srv.URL}, mapper())
+	c := New(Config{VMSelectURL: srv.URL, TempoURL: srv.URL, LokiURL: srv.URL}, mapper(), nil)
 	ctx := context.Background()
 	const stranger = "00000000-0000-0000-0000-0000000000bb"
 
@@ -348,7 +348,7 @@ func TestBackendFailureIsClassified(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := New(Config{VMSelectURL: srv.URL}, mapper())
+	c := New(Config{VMSelectURL: srv.URL}, mapper(), nil)
 	_, err := c.QueryMetrics(context.Background(), orgA, MetricsQuery{Range: window(), Metric: "cpu"})
 	if !errors.Is(err, ErrBackend) {
 		t.Fatalf("err = %v, want ErrBackend", err)
@@ -383,7 +383,7 @@ func TestGetTraceNormalisesBase64SpanIDs(t *testing.T) {
 	  {"spanId":"GM5k188Fg80=","parentSpanId":"GM5k188Fg84=","name":"GET /cart",
 	   "startTimeUnixNano":"1756000000000000000","endTimeUnixNano":"1756000001000000000"}]}]}]}`
 	srv, _ := fakeBackend(t, body)
-	c := New(Config{TempoURL: srv.URL}, mapper())
+	c := New(Config{TempoURL: srv.URL}, mapper(), nil)
 
 	got, err := c.GetTrace(context.Background(), orgA, "5b8efff798038103d269b633813fc60c")
 	if err != nil {

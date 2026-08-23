@@ -11,10 +11,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/klaro/observability/internal/alerting"
 	"github.com/klaro/observability/internal/ingestkey"
 	"github.com/klaro/observability/internal/live"
 	"github.com/klaro/observability/internal/platform/httpx"
 	"github.com/klaro/observability/internal/platform/redisx"
+	"github.com/klaro/observability/internal/usage"
 )
 
 // IngestKeyHeader is the header the SDK sets and the Collector forwards.
@@ -28,6 +30,8 @@ const maxInternalBody = 1 << 20 // 1 MiB
 // InternalDeps are the collaborators of the internal plane.
 type InternalDeps struct {
 	Authz  *ingestkey.Authorizer
+	Alerts *alerting.Receiver
+	Usage  *usage.Store
 	Signal redisx.Signaler
 }
 
@@ -50,6 +54,14 @@ func NewInternalRouter(d InternalDeps) *gin.Engine {
 	{
 		in.POST("/authz/ingest-key", d.postAuthzIngestKey)
 		in.POST("/live-ingest", d.postLiveIngest)
+
+		// Alerts. The api/v2/alerts path is what vmalert posts to; the webhook
+		// path is the documented name and accepts the Alertmanager envelope.
+		in.POST("/alerts/webhook", d.postAlertsWebhook)
+		in.POST("/alerts/api/v2/alerts", d.postAlertsWebhook)
+
+		// Volume and host metering from the gateway [BILL-03].
+		in.POST("/usage", d.postUsage)
 	}
 	return r
 }
@@ -146,3 +158,8 @@ func (d InternalDeps) postLiveIngest(c *gin.Context) {
 // component to maintain for no benefit. The flat {org_id, stream, points} form
 // stays supported because it is what tests and curl send, and what a future
 // non-OTLP producer would use.
+
+// errJSONObject is the single message for "this body is not what we can read".
+// Echoing the decoder's error for a payload that may be an alert batch would
+// put customer label values into an error string.
+var errJSONObject = errors.New("body must be a JSON array of alerts or an object containing one")

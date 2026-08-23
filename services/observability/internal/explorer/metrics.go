@@ -42,6 +42,16 @@ type Series struct {
 // MetricsResult is the response body.
 type MetricsResult struct {
 	Series []Series `json:"series"`
+	// Resolution says whether the answer came from raw samples or a rollup.
+	// The client needs it to label the chart honestly: a 1h rollup is not the
+	// same picture as raw data, and silently swapping one for the other would
+	// make a flat line look like calm rather than like coarse buckets.
+	Resolution string `json:"resolution"`
+	// Clamped reports that the requested window reached past what the plan
+	// keeps and was narrowed. From and To are the window actually queried.
+	Clamped bool      `json:"clamped"`
+	From    time.Time `json:"from"`
+	To      time.Time `json:"to"`
 	// Query is the MetricsQL this package generated. Returning it makes the
 	// server-side enforcement inspectable - you can see the org matcher is
 	// there - and it is safe because the caller supplied every other part.
@@ -104,12 +114,35 @@ func (c *Client) QueryMetrics(ctx context.Context, orgID string, q MetricsQuery)
 		return MetricsResult{}, err
 	}
 
+	// Resolve what this org may still see before building any query. Retention
+	// is enforced here rather than left to the backends: VictoriaMetrics cannot
+	// delete a time range, so "not queryable past the plan" has to be a
+	// property of the read path or it is not a property at all.
+	now := time.Now()
+	keep := c.retentionFor(ctx, orgID)
+	resolution := pickResolution(q.Range.From, q.Step, keep, now)
+
+	series := q.Metric
+	filters := q.Filters
+	window := keep.Metrics
+	if rollup := rollupSeries(resolution); rollup != "" {
+		// The rollup keeps the original name in a label, so the metric moves
+		// from the series name into a matcher.
+		if q.Metric != "" {
+			filters = append(append([]Matcher(nil), filters...), Matcher{Label: MetricLabel, Value: q.Metric})
+		}
+		series = rollup
+		window = keep.Rollup
+	}
+	clamped := false
+	q.Range, clamped = clamp(q.Range, window, now)
+
 	account, err := c.tenants.VMAccountID(ctx, orgID)
 	if err != nil {
 		return MetricsResult{}, fmt.Errorf("%w: resolve tenant: %v", ErrBackend, err)
 	}
 
-	promQL, err := Aggregate(q.Agg, Selector(q.Metric, orgID, q.Filters), q.Step)
+	promQL, err := Aggregate(q.Agg, Selector(series, orgID, filters), q.Step)
 	if err != nil {
 		return MetricsResult{}, err
 	}
@@ -131,7 +164,14 @@ func (c *Client) QueryMetrics(ctx context.Context, orgID string, q MetricsQuery)
 		return MetricsResult{}, fmt.Errorf("%w: metrics query returned status %q", ErrBackend, raw.Status)
 	}
 
-	out := MetricsResult{Series: make([]Series, 0, len(raw.Data.Result)), Query: promQL}
+	out := MetricsResult{
+		Series:     make([]Series, 0, len(raw.Data.Result)),
+		Query:      promQL,
+		Resolution: resolution,
+		Clamped:    clamped,
+		From:       q.Range.From,
+		To:         q.Range.To,
+	}
 	for _, r := range raw.Data.Result {
 		s := Series{Labels: stripInternalLabels(r.Metric), Points: make([]Sample, 0, len(r.Values))}
 		for _, v := range r.Values {

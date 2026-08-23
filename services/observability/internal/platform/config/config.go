@@ -53,6 +53,24 @@ type Config struct {
 	// KeyTouchWindow rate-limits observability_keys.last_used_at writes.
 	KeyTouchWindow time.Duration
 
+	// Alerting. RuleFile is what vmalert reads; empty disables rule syncing so a
+	// deployment without vmalert stays quiet instead of failing every interval.
+	RuleFile         string
+	VMAlertReloadURL string
+	RuleSyncInterval time.Duration
+	// DashboardBaseURL is prefixed to the link carried in a notification.
+	DashboardBaseURL string
+	// SMTPAddr and SMTPFrom point at MailHog in development, which accepts
+	// anything and shows it in a UI, so no real mail is ever sent by accident.
+	SMTPAddr        string
+	SMTPFrom        string
+	SlackWebhookURL string
+
+	// Retention and usage job cadence.
+	RetentionInterval time.Duration
+	RetentionDryRun   bool
+	UsageInterval     time.Duration
+
 	// Telemetry backends the Explorer proxies to. An empty URL disables that
 	// signal rather than dialling nothing: a deployment without Tempo should
 	// say "no traces backend", not time out.
@@ -113,6 +131,13 @@ func Load(getenv func(string) string) (Config, error) {
 		VMSelectURL:        getenv("OBS_VMSELECT_URL"),
 		TempoURL:           getenv("OBS_TEMPO_URL"),
 		LokiURL:            getenv("OBS_LOKI_URL"),
+		RuleFile:           getenv("OBS_RULE_FILE"),
+		VMAlertReloadURL:   getenv("OBS_VMALERT_RELOAD_URL"),
+		DashboardBaseURL:   getenv("OBS_DASHBOARD_BASE_URL"),
+		SMTPAddr:           getenv("OBS_SMTP_ADDR"),
+		SMTPFrom:           str(getenv, "OBS_SMTP_FROM", "alerts@klaro.local"),
+		SlackWebhookURL:    getenv("OBS_SLACK_WEBHOOK_URL"),
+		RetentionDryRun:    boolean(getenv, "OBS_RETENTION_DRY_RUN", false),
 		DBConnectTimeout:   10 * time.Second,
 		TLS: TLSPaths{
 			CAFile:   getenv("OBS_TLS_CA_FILE"),
@@ -145,6 +170,9 @@ func Load(getenv func(string) string) (Config, error) {
 		{"OBS_AUTHZ_CACHE_TTL_SEC", 30, &c.AuthzCacheTTL},
 		{"OBS_KEY_TOUCH_WINDOW_SEC", 60, &c.KeyTouchWindow},
 		{"OBS_EXPLORER_TIMEOUT_SEC", 30, &c.ExplorerTimeout},
+		{"OBS_RULE_SYNC_INTERVAL_SEC", 60, &c.RuleSyncInterval},
+		{"OBS_RETENTION_INTERVAL_SEC", 21600, &c.RetentionInterval},
+		{"OBS_USAGE_INTERVAL_SEC", 3600, &c.UsageInterval},
 	} {
 		secs, err := integer(getenv, d.key, d.def)
 		switch {

@@ -80,19 +80,25 @@ func (c Config) Configured(base string) bool { return strings.TrimSpace(base) !=
 
 // Client queries the storage backends on behalf of one org at a time.
 type Client struct {
-	cfg     Config
-	tenants tenants.Mapper
-	http    *http.Client
+	cfg       Config
+	tenants   tenants.Mapper
+	retention RetentionFunc
+	http      *http.Client
 }
 
-// New builds a Client. mapper is what turns an org into the tenant identity of
-// each backend; without it there is no isolation, so it is required.
-func New(cfg Config, mapper tenants.Mapper) *Client {
+// New builds a Client.
+//
+// mapper is what turns an org into the tenant identity of each backend; without
+// it there is no isolation, so it is required. retention may be nil, which
+// means "keep everything" - a deployment with no plan concept should still be
+// able to read its own data.
+func New(cfg Config, mapper tenants.Mapper, retention RetentionFunc) *Client {
 	cfg = cfg.withDefaults()
 	return &Client{
-		cfg:     cfg,
-		tenants: mapper,
-		http:    &http.Client{Timeout: cfg.Timeout},
+		cfg:       cfg,
+		tenants:   mapper,
+		retention: retention,
+		http:      &http.Client{Timeout: cfg.Timeout},
 	}
 }
 

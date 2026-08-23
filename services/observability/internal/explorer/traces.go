@@ -137,6 +137,9 @@ func (c *Client) SearchTraces(ctx context.Context, orgID string, q TracesQuery) 
 	if err != nil {
 		return TracesResult{}, err
 	}
+	// Traces have no rollup - there is no standard downsampling for them - so
+	// retention is enforced by narrowing the window and nothing else.
+	q.Range, _ = clamp(q.Range, c.retentionFor(ctx, orgID).Traces, time.Now())
 
 	expr := traceQL(q.Service, q.MinDuration)
 	params := url.Values{}

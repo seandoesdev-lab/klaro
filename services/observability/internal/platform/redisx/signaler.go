@@ -26,6 +26,11 @@ type Signaler interface {
 	// SubscribeLive returns a receive channel and a cancel func. The channel is
 	// closed when the subscription ends.
 	SubscribeLive(ctx context.Context, orgID, stream string) (<-chan []byte, func(), error)
+	// Publish sends a payload on a plain, non-org-scoped subject: alerting and
+	// usage events are read by internal services, not by tenants.
+	Publish(ctx context.Context, subject string, payload []byte) error
+	// Subscribe receives a plain subject.
+	Subscribe(ctx context.Context, subject string) (<-chan []byte, func(), error)
 	Close() error
 }
 
@@ -147,3 +152,80 @@ var (
 	_ Signaler = (*Redis)(nil)
 	_ Signaler = (*Memory)(nil)
 )
+
+// Publish sends a payload on a plain subject.
+//
+// Separate from PublishLive because the audience is different: a live channel is
+// org-scoped and read by that tenant's browsers, while a subject like
+// klaro.obs.alert or klaro.usage.emitted is read by internal services
+// (Notifier, Billing) that legitimately see every org. Keeping them apart means
+// the org-scoped path cannot accidentally be handed a global subject.
+func (r *Redis) Publish(ctx context.Context, subject string, payload []byte) error {
+	if subject == "" {
+		return fmt.Errorf("%w: empty subject", ErrInvalidScope)
+	}
+	return r.c.Publish(ctx, subject, payload).Err()
+}
+
+// Subscribe receives a plain subject.
+func (r *Redis) Subscribe(ctx context.Context, subject string) (<-chan []byte, func(), error) {
+	if subject == "" {
+		return nil, nil, fmt.Errorf("%w: empty subject", ErrInvalidScope)
+	}
+	sub := r.c.Subscribe(ctx, subject)
+	out := make(chan []byte, subscriberBuffer)
+	go func() {
+		defer close(out)
+		for msg := range sub.Channel() {
+			select {
+			case out <- []byte(msg.Payload):
+			default: // drop-oldest backpressure: never block the publisher
+			}
+		}
+	}()
+	return out, func() { _ = sub.Close() }, nil
+}
+
+// Publish implements Signaler for the in-process fake.
+func (m *Memory) Publish(_ context.Context, subject string, payload []byte) error {
+	if subject == "" {
+		return fmt.Errorf("%w: empty subject", ErrInvalidScope)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, ch := range m.subs[subject] {
+		select {
+		case ch <- payload:
+		default:
+		}
+	}
+	return nil
+}
+
+// Subscribe implements Signaler for the in-process fake.
+func (m *Memory) Subscribe(_ context.Context, subject string) (<-chan []byte, func(), error) {
+	if subject == "" {
+		return nil, nil, fmt.Errorf("%w: empty subject", ErrInvalidScope)
+	}
+	ch := make(chan []byte, subscriberBuffer)
+	m.mu.Lock()
+	m.subs[subject] = append(m.subs[subject], ch)
+	m.mu.Unlock()
+
+	var once sync.Once
+	cancel := func() {
+		once.Do(func() {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			kept := m.subs[subject][:0]
+			for _, c := range m.subs[subject] {
+				if c != ch {
+					kept = append(kept, c)
+				}
+			}
+			m.subs[subject] = kept
+			close(ch)
+		})
+	}
+	return ch, cancel, nil
+}

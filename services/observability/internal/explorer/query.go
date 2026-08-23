@@ -208,3 +208,10 @@ func stripInternalLabels(labels map[string]string) map[string]string {
 	}
 	return out
 }
+
+// ReservedLabel reports whether a label is one this package sets itself.
+//
+// Exported because the alerting renderer builds queries too, and it must refuse
+// exactly the same labels: a rule that could restate the org matcher could
+// restate it as another org.
+func ReservedLabel(label string) bool { return reservedLabels[label] }

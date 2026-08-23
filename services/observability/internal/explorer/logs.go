@@ -91,6 +91,9 @@ func (c *Client) QueryLogs(ctx context.Context, orgID string, q LogsQuery) (Logs
 	if err != nil {
 		return LogsPage{}, err
 	}
+	// Logs have no rollup either: Loki offers sampling and retention, not
+	// downsampling. The window is narrowed to what the plan keeps.
+	q.Range, _ = clamp(q.Range, c.retentionFor(ctx, orgID).Logs, time.Now())
 
 	expr := logQL(orgID, q.Filters, q.Contains)
 	params := url.Values{}
