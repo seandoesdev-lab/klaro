@@ -105,6 +105,13 @@ deploy/                  compose: postgres · redis · obsplane · collector · 
 3. **저장소 native 테넌시** — VictoriaMetrics `AccountID`, Tempo/Loki `X-Scope-OrgID`(HOW-8).
    이 값은 CP만 정한다. 라벨 매처를 빠뜨려서 생기는 사고를 구조적으로 없앤다.
 
+"CP만 정한다"를 실제로 지키려면 **클라이언트가 보낸 테넌트 헤더를 지워야** 한다. 게이트웨이의
+요청 메타데이터는 대소문자를 구분하지만 `client.NewMetadata`는 모든 키를 소문자로 접는다.
+그래서 위조한 `Klaro-Vm-Account-Id`와 권위값 `klaro-vm-account-id`를 함께 두면 둘이 한 항목으로
+합쳐지고, **승자는 Go 맵 순회 순서가 정한다** — 그 순간 SDK가 지정한 org로 쓰기가 간다.
+`klaroauth`가 권위값을 각인하기 전에 테넌트 4키를 대소문자 무시로 제거하는 이유다
+(`extension.go` `withTenant`, 회귀 테스트 `TestForgedTenantHeadersAreIgnored`).
+
 **앱은 반드시 `klaro_obs_app`(NOSUPERUSER·NOBYPASSRLS) 롤로 접속해야 한다.**
 superuser/BYPASSRLS 롤로 붙으면 Postgres가 FORCE RLS를 면제하므로 SQL은 그대로인데
 격리만 조용히 사라진다. `db.AssertRLSEnforced`가 부팅 시 이를 확인하고, 위반이면 기동을 거부한다.
@@ -376,6 +383,58 @@ Grafana 임베드가 아니므로 패널이 외부에서 주소 지정될 필요
 TLS 번들도 없고 `OBS_INTERNAL_INSECURE`도 아니면 내부 리스너는 **뜨지 않는다**(로그로 알린다).
 mTLS가 계약이므로, 번들이 없다고 평문으로 조용히 내려앉지 않는다.
 
+## mTLS를 어디서 강제하나
+
+`CLAUDE.md`는 SDK↔Collector를 **mTLS 필수**로 못박는다. 그 강제가 실제로 일어나는
+지점은 딱 한 곳이다:
+
+| 홉 | 강제 지점 | 파일 |
+|----|-----------|------|
+| **SDK → Collector** | `receivers.otlp.protocols.{grpc,http}.tls.client_ca_file` | `deploy/otel-collector.prod.yaml` |
+| Collector → CP(authz) | `extensions.klaroauth.tls` + `https://` 엔드포인트 | 같은 파일 (`klaroauth` Validate가 강제) |
+| Collector → CP(usage·live) | `processors.klarousage.tls` · `exporters.otlp_http/live.tls` | 같은 파일 |
+| CP 내부 리스너 | `OBS_TLS_CA_FILE`/`CERT`/`KEY` (없으면 리스너가 뜨지 않음) | 환경변수 |
+
+`client_ca_file`이 비어 있지 않으면 `configtls.ServerConfig`가
+`tls.RequireAndVerifyClientCert`를 세팅한다(`ServerConfig.LoadTLSConfig`). 즉 **이 키
+하나가 강제 스위치**이고, 클라이언트 인증서 없이 붙는 SDK는 핸드셰이크에서 끊긴다.
+별도의 `require_client_cert` 키는 collector `configtls` v1.65.0 스키마에 **없다** —
+넣으면 알 수 없는 필드로 기동이 실패한다.
+
+mTLS와 관측 키는 층이 다르다: mTLS는 "연결해도 되는가", `klaro-obs-key`는 "어느
+org인가"를 답한다. SDK 기본값이 insecure인 것은 `SDK_CONTRACT.md` §4의 승인된
+결정이므로 그대로 두고, 강제는 서버 쪽에서 한다.
+
+**개발과 프로덕션의 갈림은 설정 파일 한 장**이다. `deploy/otel-collector.yaml`은
+평문 기준선이고, 프로덕션은 그 위에 오버레이를 겹친다(Collector가 `--config`를
+순서대로 딥머지한다).
+
+```bash
+klaro-otelcol --config /etc/klaro/otel-collector.yaml \
+              --config /etc/klaro/otel-collector.prod.yaml
+```
+
+머지 결과는 기동 전에 확인할 수 있다. `validate`는 파싱만 하지 않고 컴포넌트까지
+만들어 보므로, **인증서 파일이 실제로 있어야** 통과한다 — 오타뿐 아니라 빠진 번들도
+잡힌다. 두 설정과 `tls/` 번들을 한 디렉터리(`$BUNDLE`)에 두고 넘긴다.
+
+```bash
+MSYS_NO_PATHCONV=1 docker run --rm -v "$BUNDLE:/etc/klaro" \
+  --entrypoint /usr/local/bin/klaro-otelcol klaro-otelcol \
+  validate --config /etc/klaro/otel-collector.yaml \
+           --config /etc/klaro/otel-collector.prod.yaml
+```
+
+실측으로 확인한 것: 이 구성으로 게이트웨이를 띄우고 클라이언트 인증서 **없이**
+4317·4318에 붙으면 TLS1.3 `alert 116 (certificate required)`로 끊기고, sdk-ca가 서명한
+인증서로 붙으면 핸드셰이크가 성립한다.
+
+리시버의 mTLS는 `tls` 블록의 **존재**로 켜지므로 환경변수 하나로 끄고 켤 수 없다.
+그래서 주석으로 준비만 해두는 대신 오버레이 파일로 분리했다 — 한 번도 적용된 적
+없는 설정이 주석으로 남아 있으면 켜져 있다고 착각하기 쉽다. 개발에서 오버레이를
+빼면 평문이 되지만, 그때는 베이스의 `insecure: true`가 명시적 요청 표시다.
+저장소 계층(vminsert/tempo/loki)의 TLS는 아직 이 오버레이 밖이다.
+
 ## 빌드 · 테스트
 
 로컬에 Go 툴체인이 없어도 된다. `docker` 이미지로 실행한다(`$PWD`는 이 디렉토리).
@@ -556,8 +615,11 @@ Tempo/Loki는 `otlp`/`otlphttp` 익스포터가 컨텍스트를 유지하므로 
 
 - **인증은 개발 스텁**(고정 토큰 → 고정 org). JWT/OAuth/RBAC(`Org > Project > Resource`)는 후속.
 - **개발 compose의 내부 홉은 평문**이다. obsplane은 `OBS_INTERNAL_INSECURE`, 게이트웨이는
-  `klaroauth.tls.insecure`로 **명시적으로** 그렇게 요청해야 하고, 두 곳 다 프로덕션 mTLS 블록이
-  주석으로 준비되어 있다. SDK↔Collector mTLS도 같은 자리에 있다.
+  `klaroauth.tls.insecure`로 **명시적으로** 그렇게 요청해야 한다. 프로덕션 mTLS(SDK↔Collector
+  포함)는 `deploy/otel-collector.prod.yaml` 오버레이가 켠다 — 위 "mTLS를 어디서 강제하나"
+  참고. compose는 그 오버레이를 싣지 않으므로 개발은 평문 그대로다.
+- **저장소 계층(vminsert/tempo/loki) 홉의 TLS는 아직 오버레이 밖**이다. `CLAUDE.md`가 필수로
+  못박은 SDK↔Collector 경로는 강제되지만, 클러스터 내부 저장소 홉 전환은 별도 인프라 작업이다.
 - **`stream=service`는 발행자가 없다.** 채널과 구독 경로는 있지만 아직 아무도 쓰지 않는다.
 - **Explorer는 구조화 파라미터만** 받는다. raw 쿼리 개방은 label-enforcement 프록시를
   앞단에 두는 별도 결정이다(설계 HOW-2 트레이드오프).

@@ -162,6 +162,17 @@ func withTenant(ctx context.Context, g grant, sources map[string][]string, keyHe
 	}
 	deleteFold(md, keyHeader)
 
+	// Drop every spelling of the tenant keys the client sent before stamping the
+	// authoritative ones. Without this a forged Klaro-Vm-Account-Id survives
+	// alongside the real klaro-vm-account-id - md is case-sensitive, and
+	// client.NewMetadata then lowercases both into one map, so which value wins
+	// is decided by Go's map iteration order. klarotenant turns that winner into
+	// the vm_account_id label vminsert routes on, so losing the race sends the
+	// batch to an org the client named: cross-tenant, non-deterministic, silent.
+	for _, k := range tenantMetadataKeys {
+		deleteFold(md, k)
+	}
+
 	md[MetadataScopeOrgID] = []string{g.ScopeOrgID}
 	md[MetadataVMAccountID] = []string{strconv.FormatUint(uint64(g.VMAccountID), 10)}
 	md[MetadataOrgID] = []string{g.OrgID}

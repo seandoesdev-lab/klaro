@@ -1,0 +1,88 @@
+# 프로덕션 오버레이 — mTLS 강제 (CLAUDE.md: "APM SDK↔Collector는 OTLP/gRPC + mTLS 필수")
+#
+# 이 파일은 단독 설정이 아니다. otel-collector.yaml 위에 겹쳐서 쓴다:
+#
+#   klaro-otelcol --config /etc/klaro/otel-collector.yaml \
+#                 --config /etc/klaro/otel-collector.prod.yaml
+#
+# Collector는 --config를 순서대로 딥머지하므로, 뒤에 오는 이 파일이 개발용
+# 평문 설정(insecure: true, http:// 엔드포인트)을 덮어쓴다. 파이프라인·프로세서
+# 순서 같은 나머지 구조는 베이스 파일 하나에만 존재한다 — 두 곳에 복제하면
+# 갈라지므로 여기에는 TLS로 바뀌는 값만 둔다.
+#
+# 왜 오버레이인가: 리시버의 mTLS는 tls 블록이 있으면 켜지고 없으면 꺼진다.
+# ${env:...} 치환으로는 "블록 자체를 조건부로 없애기"가 안 되므로, 환경변수
+# 하나로 끄고 켜는 대신 프로덕션에서 설정 파일을 한 장 더 넘기는 방식으로 만든다.
+# 개발에서 이 파일을 빼면 평문이 되지만, 그때는 베이스의 insecure: true가
+# "의도적으로 그렇게 요청했다"는 표시다(klaroauth Validate가 강제한다).
+#
+# ── 강제 지점 ──────────────────────────────────────────────────────────────
+# receivers.otlp.protocols.*.tls.client_ca_file 이 SDK 클라이언트 인증서를 실제로
+# 요구하는 단 하나의 지점이다. configtls.ServerConfig는 client_ca_file이 비어
+# 있지 않으면 tls.RequireAndVerifyClientCert를 세팅한다(ServerConfig.LoadTLSConfig).
+# 즉 이 키가 곧 강제 스위치다. 별도의 require_client_cert 키는 configtls v1.65.0
+# 스키마에 없다 — 넣으면 알 수 없는 필드로 기동 자체가 실패한다.
+#
+# 인증서 배포는 SDK_CONTRACT.md §4를 따른다. SDK 기본값이 insecure인 것은 승인된
+# 결정이므로 그대로 두고, 강제는 서버 쪽(이 파일)에서 한다: 클라이언트 인증서
+# 없이 붙는 SDK는 핸드셰이크에서 끊긴다. 키(klaro-obs-key)는 그 다음 층이다 —
+# mTLS는 "연결해도 되는가", 키는 "어느 org인가"를 답한다.
+extensions:
+  klaroauth:
+    # 내부 홉도 mTLS다. https로 바꾸지 않으면 Validate가 tls.insecure를 요구한다.
+    endpoint: https://obsplane:8443/internal/authz/ingest-key
+    tls:
+      insecure: false
+      ca_file: /etc/klaro/tls/ca.pem
+      cert_file: /etc/klaro/tls/collector.pem
+      key_file: /etc/klaro/tls/collector-key.pem
+      server_name: obsplane
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        tls:
+          # 서버 신원(SDK가 검증한다).
+          cert_file: /etc/klaro/tls/collector.pem
+          key_file: /etc/klaro/tls/collector-key.pem
+          # 클라이언트 신원 강제. 이 줄이 mTLS를 켠다(위 "강제 지점" 참고).
+          client_ca_file: /etc/klaro/tls/sdk-ca.pem
+          # 폐기된 SDK 인증서가 게이트웨이 재기동을 기다리지 않고 빠지게 한다.
+          client_ca_file_reload: true
+          min_version: "1.3"
+      http:
+        tls:
+          cert_file: /etc/klaro/tls/collector.pem
+          key_file: /etc/klaro/tls/collector-key.pem
+          client_ca_file: /etc/klaro/tls/sdk-ca.pem
+          client_ca_file_reload: true
+          min_version: "1.3"
+
+processors:
+  klarousage:
+    endpoint: https://obsplane:8443/internal/usage
+    tls:
+      insecure: false
+      ca_file: /etc/klaro/tls/ca.pem
+      cert_file: /etc/klaro/tls/collector.pem
+      key_file: /etc/klaro/tls/collector-key.pem
+      server_name: obsplane
+
+exporters:
+  # 라이브 복제도 CP 내부 평면으로 가는 홉이므로 같은 번들을 쓴다.
+  otlp_http/live:
+    metrics_endpoint: https://obsplane:8443/internal/live-ingest
+    tls:
+      insecure: false
+      ca_file: /etc/klaro/tls/ca.pem
+      cert_file: /etc/klaro/tls/collector.pem
+      key_file: /etc/klaro/tls/collector-key.pem
+      # 이 홉은 표준 configtls.ClientConfig라 키 이름이 server_name_override다
+      # (klaroauth/klarousage는 자체 TLSConfig라 server_name). 섞어 쓰면
+      # "invalid keys" 로 기동이 실패하므로 validate로 확인하고 맞춘 값이다.
+      server_name_override: obsplane
+
+# 남은 홉(vminsert / tempo / loki)은 여기서 다루지 않는다. 저장소 계층은 클러스터
+# 내부이고 각 백엔드의 TLS 설정 방식이 별개이므로 그 전환은 인프라 작업으로
+# 분리한다. CLAUDE.md가 "필수"로 못박은 SDK↔Collector 경로는 위에서 강제된다.

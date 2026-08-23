@@ -16,6 +16,12 @@ import (
 
 const testOrg = "00000000-0000-0000-0000-0000000000aa"
 
+// The tenant a header-forging client would try to write into.
+const (
+	evilOrg     = "00000000-0000-0000-0000-0000000000ee"
+	evilAccount = "666"
+)
+
 // grantServer stands in for the control plane. It counts calls so the tests can
 // tell a cache hit from a round trip.
 func grantServer(t *testing.T, status int, body string) (*httptest.Server, *atomic.Int64) {
@@ -266,5 +272,86 @@ func TestHeaderLookupIsCaseInsensitive(t *testing.T) {
 		if got := md.Get(spelling); len(got) != 0 {
 			t.Errorf("header %q survived on the context: %v", spelling, got)
 		}
+	}
+}
+
+// A client must not be able to name its own tenant. This is the metadata
+// equivalent of the label forgery klarotenant already blocks: the collector
+// stores request metadata case-sensitively but client.NewMetadata lowercases
+// every key on the way in, so a forged Klaro-Vm-Account-Id used to survive
+// next to the authoritative klaro-vm-account-id and the two collapsed into one
+// entry whose winner Go's map iteration order picked. Losing that coin flip
+// routes the batch to the org the client asked for.
+//
+// The loop is what makes the check bite: one iteration could pass by luck, and
+// map order is randomised per range.
+func TestForgedTenantHeadersAreIgnored(t *testing.T) {
+	srv, _ := grantServer(t, http.StatusOK, okGrant)
+	a := newTestExtension(t, srv.URL, nil)
+
+	// Every casing a client could reach for, including the ones the two
+	// receivers themselves produce (lowercase over gRPC, canonical over HTTP).
+	forged := map[string]string{
+		"x-scope-orgid":       evilOrg,
+		"X-Scope-OrgID":       evilOrg,
+		"X-SCOPE-ORGID":       evilOrg,
+		"klaro-vm-account-id": evilAccount,
+		"Klaro-Vm-Account-Id": evilAccount,
+		"KLARO-VM-ACCOUNT-ID": evilAccount,
+		"klaro-org-id":        evilOrg,
+		"Klaro-Org-Id":        evilOrg,
+		"klaro-quota-overage": "true",
+		"Klaro-Quota-Overage": "true",
+	}
+	want := map[string]string{
+		MetadataScopeOrgID:   testOrg,
+		MetadataVMAccountID:  "7",
+		MetadataOrgID:        testOrg,
+		MetadataQuotaOverage: "false",
+	}
+
+	for i := 0; i < 64; i++ {
+		src := sources("obsk_live")
+		for k, v := range forged {
+			src[k] = []string{v}
+		}
+
+		ctx, err := a.Authenticate(context.Background(), src)
+		if err != nil {
+			t.Fatalf("iteration %d: %v", i, err)
+		}
+		md := client.FromContext(ctx).Metadata
+
+		for key, expected := range want {
+			got := md.Get(key)
+			if len(got) != 1 || got[0] != expected {
+				t.Fatalf("iteration %d: %s = %v, want [%s] - the client's value won",
+					i, key, got, expected)
+			}
+		}
+		// Nothing the client sent may linger anywhere on the context, under any
+		// key: a stray copy is a value some later component could read.
+		for key := range md.Keys() {
+			for _, v := range md.Get(key) {
+				if v == evilOrg || v == evilAccount {
+					t.Fatalf("iteration %d: forged value %q survived under %s", i, v, key)
+				}
+			}
+		}
+	}
+}
+
+// deleteFold is the whole defence, so pin its contract directly.
+func TestDeleteFoldRemovesEverySpelling(t *testing.T) {
+	md := map[string][]string{
+		"klaro-vm-account-id": {"1"},
+		"Klaro-Vm-Account-Id": {"2"},
+		"KLARO-VM-ACCOUNT-ID": {"3"},
+		"user-agent":          {"otel-sdk"},
+	}
+	deleteFold(md, MetadataVMAccountID)
+
+	if len(md) != 1 || len(md["user-agent"]) != 1 {
+		t.Errorf("md = %v, want only user-agent left", md)
 	}
 }
