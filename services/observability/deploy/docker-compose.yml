@@ -1,0 +1,39 @@
+# 파운데이션 단계(설계 §6 빌드순서 1~2)의 최소 구성이다.
+# otel-collector / victoriametrics / tempo / loki / vmalert / alertmanager는
+# 수집 파이프라인(4단계)·통합 기동(12단계)에서 추가한다.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: klaro
+      POSTGRES_PASSWORD: klaro
+      POSTGRES_DB: klaro_obs
+    ports: ["5433:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U klaro"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7
+    ports: ["6380:6379"]
+
+  obsplane:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      # 요청 처리 롤은 NOSUPERUSER/NOBYPASSRLS여야 한다(0000 마이그레이션이 생성).
+      OBS_DATABASE_URL: postgres://klaro_obs_app:klaro_obs_app@postgres:5432/klaro_obs?sslmode=disable
+      # 마이그레이션은 DDL/CREATE ROLE 권한이 필요하므로 별도 관리자 DSN을 쓴다.
+      OBS_MIGRATE_DATABASE_URL: postgres://klaro:klaro@postgres:5432/klaro_obs?sslmode=disable
+      OBS_REDIS_ADDR: redis:6379
+      OBS_ADDR: ":8090"
+      # 개발 인증 스텁(S1과 동일 형태). 실제 인증은 후속 단계에서 교체.
+      OBS_DEV_TOKEN: dev
+      OBS_DEV_ORG_ID: "00000000-0000-0000-0000-000000000001"
+    ports: ["8090:8090"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
