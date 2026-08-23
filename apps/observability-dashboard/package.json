@@ -1,0 +1,25 @@
+{
+  "name": "@klaro/observability-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "klaro 상시 관측 플랫폼(S3) 대시보드 — Explorer(메트릭/트레이스/로그)·라이브·알림·대시보드",
+  "scripts": {
+    "dev": "next dev -p 3100",
+    "build": "next build",
+    "start": "next start -p 3100",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "next": "15.5.4",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "recharts": "3.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.3",
+    "@types/react": "19.1.9",
+    "@types/react-dom": "19.1.7",
+    "typescript": "5.7.3"
+  }
+}
