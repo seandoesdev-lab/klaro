@@ -1,0 +1,39 @@
+# Loki — 로그 저장소. auth_enabled: true 이면 X-Scope-OrgID가 필수가 되고,
+# 헤더 없는 요청은 거부된다(설계 HOW-8: 저장소 계층에서 격리 강제).
+auth_enabled: true
+
+server:
+  http_listen_port: 3100
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  # OTLP 로그의 resource/scope 속성을 structured metadata로 보존한다.
+  allow_structured_metadata: true
+  # 개발 로컬 디스크 상한. 플랜별 보존은 CP retentionjob이 별도로 집행한다.
+  retention_period: 24h
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem

@@ -1,0 +1,28 @@
+# Tempo — 트레이스 저장소. 테넌시는 X-Scope-OrgID 헤더로 강제된다(설계 HOW-8).
+# multitenancy_enabled: true 이면 헤더 없는 쓰기/읽기는 거부되므로,
+# 게이트웨이가 헤더를 빠뜨리는 사고가 조용한 혼합이 아니라 실패로 드러난다.
+multitenancy_enabled: true
+
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/blocks
+    wal:
+      path: /var/tempo/wal
+
+# 개발 로컬 디스크 보호(04-cost-model 로컬 자원 상한). 플랜별 보존은
+# CP retentionjob(설계 §6 8단계)이 집행한다.
+compactor:
+  compaction:
+    block_retention: 24h

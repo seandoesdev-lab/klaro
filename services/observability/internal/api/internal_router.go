@@ -1,10 +1,13 @@
 package api
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -87,18 +90,6 @@ func (d InternalDeps) postAuthzIngestKey(c *gin.Context) {
 	c.JSON(http.StatusOK, grant)
 }
 
-// liveIngestRequest is the Collector's replicated metric sample.
-//
-// OrgID is set by the Collector from the grant it just verified, never from
-// anything the SDK sent. The Collector is trusted here only because it
-// authenticated with a client certificate on this listener.
-type liveIngestRequest struct {
-	OrgID  string          `json:"org_id"`
-	Stream string          `json:"stream"`
-	TS     json.Number     `json:"ts"`
-	Points json.RawMessage `json:"points"`
-}
-
 // validStream keeps the stream name inside a character set that cannot escape
 // its Redis channel. The channel is klaro:obs:live:<org>:<stream>, so a ':' in
 // the stream would let a caller address a channel it was not granted.
@@ -122,33 +113,94 @@ func validStream(s string) bool {
 // This is the ingest half of the live path. The WebSocket fan-out that consumes
 // the channel is build-order step 5; publishing already works, so a subscriber
 // can be attached without touching the Collector again.
+// readInternalBody reads a request body, transparently decompressing gzip.
+//
+// The Collector compresses OTLP/HTTP exports by default, so a handler that read
+// raw bytes would see gzip framing and reject every real batch while passing
+// every hand-written curl. The limit is applied to both the compressed and the
+// decompressed stream, so a small compressed payload cannot expand into an
+// unbounded allocation.
+func readInternalBody(c *gin.Context) ([]byte, error) {
+	var reader io.Reader = io.LimitReader(c.Request.Body, maxInternalBody)
+	if strings.EqualFold(c.GetHeader("Content-Encoding"), "gzip") {
+		zr, err := gzip.NewReader(reader)
+		if err != nil {
+			return nil, fmt.Errorf("gzip body: %w", err)
+		}
+		defer func() { _ = zr.Close() }()
+		reader = io.LimitReader(zr, maxInternalBody)
+	}
+	return io.ReadAll(reader)
+}
+
 func (d InternalDeps) postLiveIngest(c *gin.Context) {
-	body, err := io.ReadAll(io.LimitReader(c.Request.Body, maxInternalBody))
+	body, err := readInternalBody(c)
 	if err != nil {
-		httpx.Validation(c, "unreadable body", nil)
-		return
-	}
-	var req liveIngestRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		httpx.Validation(c, "body must be a JSON object", gin.H{"parse": err.Error()})
-		return
-	}
-	if !db.ValidOrgID(req.OrgID) {
-		httpx.Validation(c, "org_id must be a uuid", nil)
-		return
-	}
-	if !validStream(req.Stream) {
-		httpx.Validation(c, "stream must be 1-32 chars of [a-z0-9_-]", gin.H{"stream": req.Stream})
+		httpx.Validation(c, "unreadable body", gin.H{"read": err.Error()})
 		return
 	}
 
-	// Republish the payload as received. Reshaping it here would put a second
-	// schema between the Collector and the WebSocket clients for no gain.
-	if err := d.Signal.PublishLive(c.Request.Context(), req.OrgID, req.Stream, body); err != nil {
-		httpx.Internal(c, "publish live batch")
+	batches, err := parseLiveBody(body)
+	if err != nil {
+		httpx.Validation(c, err.Error(), nil)
 		return
+	}
+	for _, b := range batches {
+		// Republish the group as received. Reshaping it here would put a second
+		// schema between the Collector and the WebSocket clients for no gain.
+		payload := body
+		if b.Group != nil {
+			if payload, err = json.Marshal(b); err != nil {
+				httpx.Internal(c, "encode live batch")
+				return
+			}
+		}
+		if err := d.Signal.PublishLive(c.Request.Context(), b.OrgID, b.Stream, payload); err != nil {
+			httpx.Internal(c, "publish live batch")
+			return
+		}
 	}
 	// Accepted, not OK: pub/sub is fire-and-forget by design (HOW-7), so a 200
 	// would imply a delivery guarantee that does not exist.
 	c.Status(http.StatusAccepted)
+}
+
+// parseLiveBody accepts either shape the endpoint has to handle.
+//
+// The Collector exports OTLP/JSON, because that is what an otlphttp exporter
+// emits and adding a bespoke exporter to the gateway to reshape it would be a
+// component to maintain for no benefit. The flat {org_id, stream, points} form
+// stays supported because it is what tests and curl send, and what a future
+// non-OTLP producer would use.
+func parseLiveBody(body []byte) ([]liveBatch, error) {
+	if len(body) == 0 {
+		return nil, errors.New("body must be a JSON object")
+	}
+	var probe struct {
+		OrgID           string          `json:"org_id"`
+		Stream          string          `json:"stream"`
+		ResourceMetrics json.RawMessage `json:"resourceMetrics"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return nil, fmt.Errorf("body must be a JSON object: %v", err)
+	}
+
+	if len(probe.ResourceMetrics) > 0 {
+		batches, err := splitOTLPByOrg(body)
+		if err != nil {
+			return nil, err
+		}
+		if len(batches) == 0 {
+			return nil, errors.New("otlp payload carries no resource metrics")
+		}
+		return batches, nil
+	}
+
+	if !db.ValidOrgID(probe.OrgID) {
+		return nil, errors.New("org_id must be a uuid")
+	}
+	if !validStream(probe.Stream) {
+		return nil, fmt.Errorf("stream must be 1-32 chars of [a-z0-9_-], got %q", probe.Stream)
+	}
+	return []liveBatch{{OrgID: probe.OrgID, Stream: probe.Stream}}, nil
 }

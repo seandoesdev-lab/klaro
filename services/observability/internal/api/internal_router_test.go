@@ -1,6 +1,8 @@
 package api
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -155,5 +157,124 @@ func TestLiveIngestRejectsBadScope(t *testing.T) {
 				t.Errorf("status = %d, want 422 (body %s)", w.Code, w.Body)
 			}
 		})
+	}
+}
+
+// The Collector exports OTLP/JSON, and one export can carry several tenants
+// because the gateway batches across them. Each resource group must be
+// published only to the org stamped on it - publishing the whole payload to one
+// org would hand it every other tenant in the batch.
+func TestLiveIngestSplitsOTLPByOrg(t *testing.T) {
+	d, mem := internalDeps()
+
+	chA, cancelA, err := mem.SubscribeLive(t.Context(), orgA, "metric")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancelA()
+	chB, cancelB, err := mem.SubscribeLive(t.Context(), orgB, "metric")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancelB()
+
+	body := `{"resourceMetrics":[
+	  {"resource":{"attributes":[{"key":"klaro.org_id","value":{"stringValue":"` + orgA + `"}},
+	                             {"key":"service.name","value":{"stringValue":"checkout"}}]},
+	   "scopeMetrics":[{"metrics":[{"name":"http.server.duration"}]}]},
+	  {"resource":{"attributes":[{"key":"klaro.org_id","value":{"stringValue":"` + orgB + `"}}]},
+	   "scopeMetrics":[{"metrics":[{"name":"db.client.duration"}]}]}]}`
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/live-ingest", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	NewInternalRouter(d).ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body %s)", w.Code, w.Body)
+	}
+
+	for org, ch := range map[string]<-chan []byte{orgA: chA, orgB: chB} {
+		select {
+		case got := <-ch:
+			var decoded struct {
+				OrgID string `json:"org_id"`
+				Group string `json:"-"`
+			}
+			if err := json.Unmarshal(got, &decoded); err != nil {
+				t.Fatalf("%s: payload is not JSON: %v", org, err)
+			}
+			if decoded.OrgID != org {
+				t.Errorf("%s channel carried org %s", org, decoded.OrgID)
+			}
+			// The neighbour must not be inside this payload.
+			other := orgA
+			if org == orgA {
+				other = orgB
+			}
+			if strings.Contains(string(got), other) {
+				t.Errorf("%s payload mentions %s: %s", org, other, got)
+			}
+		default:
+			t.Errorf("%s received nothing", org)
+		}
+	}
+}
+
+// A resource with no control-plane-stamped org cannot be attributed to anyone,
+// so it is refused rather than guessed at.
+func TestLiveIngestRefusesUnattributedOTLP(t *testing.T) {
+	body := `{"resourceMetrics":[{"resource":{"attributes":[` +
+		`{"key":"service.name","value":{"stringValue":"checkout"}}]}}]}`
+	w, _ := postInternal("/internal/live-ingest", body)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (body %s)", w.Code, w.Body)
+	}
+}
+
+// A client-chosen org attribute that is not a uuid must not reach set_config.
+func TestLiveIngestRefusesMalformedOTLPOrg(t *testing.T) {
+	body := `{"resourceMetrics":[{"resource":{"attributes":[` +
+		`{"key":"klaro.org_id","value":{"stringValue":"not-a-uuid"}}]}}]}`
+	w, _ := postInternal("/internal/live-ingest", body)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (body %s)", w.Code, w.Body)
+	}
+}
+
+// The Collector gzips OTLP/HTTP exports by default. A handler that only read
+// raw bytes would accept every hand-written curl and reject every real batch,
+// which is exactly the failure this covers.
+func TestLiveIngestAcceptsGzippedOTLP(t *testing.T) {
+	d, mem := internalDeps()
+
+	ch, cancel, err := mem.SubscribeLive(t.Context(), orgA, "metric")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+
+	plain := `{"resourceMetrics":[{"resource":{"attributes":[` +
+		`{"key":"klaro.org_id","value":{"stringValue":"` + orgA + `"}}]}}]}`
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write([]byte(plain)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/live-ingest", &buf)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Encoding", "gzip")
+	w := httptest.NewRecorder()
+	NewInternalRouter(d).ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body %s)", w.Code, w.Body)
+	}
+	select {
+	case <-ch:
+	default:
+		t.Fatal("the gzipped batch was not published")
 	}
 }

@@ -1,6 +1,11 @@
-# 파운데이션 단계(설계 §6 빌드순서 1~2)의 최소 구성이다.
-# otel-collector / victoriametrics / tempo / loki / vmalert / alertmanager는
-# 수집 파이프라인(4단계)·통합 기동(12단계)에서 추가한다.
+# 상시 관측 스택 로컬 기동(설계 §6 1~4단계).
+#
+# 전부 OSS이므로 비용은 ₩0이다([COST-05]). vmalert / alertmanager / mailhog는
+# 알림(7단계)에서 추가한다.
+#
+# 개발 편의를 위해 내부 홉이 평문이다: obsplane은 OBS_INTERNAL_INSECURE로,
+# 게이트웨이는 klaroauth.tls.insecure로 명시적으로 그렇게 요청해야 한다.
+# 프로덕션은 두 곳 모두 mTLS 번들을 넣는다(CLAUDE.md: 내부 mTLS 필수).
 services:
   postgres:
     image: postgres:16
@@ -30,10 +35,80 @@ services:
       OBS_MIGRATE_DATABASE_URL: postgres://klaro:klaro@postgres:5432/klaro_obs?sslmode=disable
       OBS_REDIS_ADDR: redis:6379
       OBS_ADDR: ":8090"
+      OBS_INTERNAL_ADDR: ":8443"
+      # 개발 전용 평문 내부 플레인. 프로덕션은 OBS_TLS_* 번들로 대체한다.
+      OBS_INTERNAL_INSECURE: "true"
       # 개발 인증 스텁(S1과 동일 형태). 실제 인증은 후속 단계에서 교체.
       OBS_DEV_TOKEN: dev
       OBS_DEV_ORG_ID: "00000000-0000-0000-0000-000000000001"
-    ports: ["8090:8090"]
+    ports: ["8090:8090", "8443:8443"]
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_started }
+
+  # --- 수집 게이트웨이 -----------------------------------------------------
+  otel-collector:
+    build:
+      context: ../collector
+      dockerfile: Dockerfile
+    command: ["--config", "/etc/klaro/otel-collector.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/klaro/otel-collector.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP/gRPC (SDK)
+      - "4318:4318"   # OTLP/HTTP (SDK)
+      - "13133:13133" # health_check
+    depends_on:
+      obsplane: { condition: service_started }
+      vminsert: { condition: service_started }
+      tempo: { condition: service_started }
+      loki: { condition: service_started }
+
+  # --- 메트릭: VictoriaMetrics 클러스터 ------------------------------------
+  # AccountID 멀티테넌시는 클러스터 구성에만 있다(단일 노드에는 없다).
+  # 설계 HOW-8이 요구하는 저장소 계층 격리를 쓰려면 이 3종이 필요하다.
+  vmstorage:
+    image: victoriametrics/vmstorage:v1.150.0-cluster
+    command:
+      - "-retentionPeriod=90d"   # 최대 플랜 기준. org별 보존은 CP가 집행(HOW-5).
+      - "-storageDataPath=/storage"
+    volumes: ["vmstorage-data:/storage"]
+
+  vminsert:
+    image: victoriametrics/vminsert:v1.150.0-cluster
+    command:
+      - "-storageNode=vmstorage:8400"
+      # 멀티테넌시는 헤더로 한다(-enableMultitenancyViaHeaders, v1.150 기본 on):
+      # 테넌트가 AccountID 헤더로 오므로 org마다 익스포터를 복제할 필요가 없다.
+    ports: ["8480:8480"]
+    depends_on: [vmstorage]
+
+  vmselect:
+    image: victoriametrics/vmselect:v1.150.0-cluster
+    command: ["-storageNode=vmstorage:8401"]
+    ports: ["8481:8481"]
+    depends_on: [vmstorage]
+
+  # --- 트레이스 / 로그 ------------------------------------------------------
+  tempo:
+    image: grafana/tempo:2.9.0
+    user: root      # 로컬 블록/WAL 디렉터리 쓰기
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports: ["3200:3200"]
+
+  loki:
+    image: grafana/loki:3.5.7
+    user: root
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    volumes:
+      - ./loki.yaml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    ports: ["3100:3100"]
+
+volumes:
+  vmstorage-data:
+  tempo-data:
+  loki-data:

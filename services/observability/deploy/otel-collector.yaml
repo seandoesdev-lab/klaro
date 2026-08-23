@@ -1,0 +1,144 @@
+# klaro 수집 게이트웨이 (설계 §4.1 · §6 4단계)
+#
+#   SDK --OTLP--> [이 게이트웨이] --> VictoriaMetrics(AccountID=org)
+#                                 --> Tempo / Loki (X-Scope-OrgID=org)
+#                                 --> obsplane /internal/live-ingest (라이브 복제)
+#
+# 테넌트는 SDK가 보낸 값이 아니라 klaroauth가 컨트롤 플레인에서 받아온 값이다.
+# klarotenant가 클라이언트가 보낸 vm_account_id를 덮어쓰므로 라벨 위조로 다른
+# org에 쓰는 경로가 없다.
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+  # ① 수집 인증: klaro-obs-key → CP 검증(결과 캐시)
+  klaroauth:
+    endpoint: http://obsplane:8443/internal/authz/ingest-key
+    header: klaro-obs-key
+    # 캐시 TTL은 폐기가 반영되기까지의 최대 지연이기도 하다.
+    cache_ttl: 30s
+    negative_cache_ttl: 5s
+    timeout: 3s
+    tls:
+      # 개발 compose 전용. 프로덕션은 아래 블록으로 교체한다(CLAUDE.md: 내부 mTLS 필수).
+      #   ca_file: /etc/klaro/tls/ca.pem
+      #   cert_file: /etc/klaro/tls/collector.pem
+      #   key_file: /etc/klaro/tls/collector-key.pem
+      #   server_name: obsplane
+      insecure: true
+
+  # ② Tempo·Loki 테넌시: 컨텍스트의 org를 X-Scope-OrgID 헤더로 옮긴다.
+  headers_setter:
+    headers:
+      - action: upsert
+        key: X-Scope-OrgID
+        from_context: x-scope-orgid
+
+  # ③ VictoriaMetrics 테넌시: 같은 컨텍스트 값을 AccountID 헤더로 옮긴다.
+  #    v1.150의 -enableMultitenancyViaHeaders(기본 on) 경로다. 라벨 방식과 달리
+  #    테넌트가 데이터에 섞이지 않아 카디널리티에 영향을 주지 않는다.
+  headers_setter/vm:
+    headers:
+      - action: upsert
+        key: AccountID
+        from_context: klaro-vm-account-id
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+        # include_metadata는 klaroauth가 없어도 원본 헤더를 컨텍스트에 남기게 한다.
+        include_metadata: true
+        auth:
+          authenticator: klaroauth
+        # 프로덕션 mTLS(SDK↔Collector):
+        #   tls:
+        #     ca_file: /etc/klaro/tls/ca.pem
+        #     cert_file: /etc/klaro/tls/collector.pem
+        #     key_file: /etc/klaro/tls/collector-key.pem
+        #     client_ca_file: /etc/klaro/tls/ca.pem
+      http:
+        endpoint: 0.0.0.0:4318
+        include_metadata: true
+        auth:
+          authenticator: klaroauth
+
+processors:
+  memory_limiter:
+    check_interval: 2s
+    limit_percentage: 75
+    spike_limit_percentage: 20
+
+  # ③ 테넌트 각인. batch보다 반드시 앞에 와야 한다 — batch는 요청 컨텍스트를
+  #    합치므로, 그 뒤에서는 어느 org의 데이터인지 더 이상 알 수 없다.
+  klarotenant:
+    vm_project_id: 0
+    # 테넌트가 없으면 배치를 버린다. 라벨 없는 메트릭은 VictoriaMetrics의
+    # 기본 계정(모든 org 공용 버킷)으로 들어가므로, 유실보다 나쁜 결과가 된다.
+    require_tenant: true
+
+  batch:
+    # 라이브 대시보드 ≤2초(APM-02 / HOW-7)에 맞춘 플러시 주기.
+    timeout: 2s
+    send_batch_size: 8192
+    send_batch_max_size: 16384
+    # 테넌트 메타데이터를 배치 키로 삼는다. 이게 없으면 headers_setter가
+    # 읽을 값이 사라지고 여러 org가 한 배치로 합쳐진다.
+    metadata_keys: [klaro-org-id, klaro-vm-account-id, x-scope-orgid]
+    metadata_cardinality_limit: 1000
+
+exporters:
+  # 메트릭: vminsert 멀티테넌트 쓰기. 테넌트는 headers_setter/vm이 붙이는
+  # AccountID 헤더로 전달되므로 org마다 익스포터를 복제할 필요가 없다.
+  prometheus_remote_write/vm:
+    endpoint: http://vminsert:8480/insert/multitenant/prometheus/api/v1/write
+    auth:
+      authenticator: headers_setter/vm
+    remote_write_queue:
+      enabled: true
+      num_consumers: 4
+    tls:
+      insecure: true
+
+  otlp_grpc/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+    auth:
+      authenticator: headers_setter
+
+  otlp_http/loki:
+    logs_endpoint: http://loki:3100/otlp/v1/logs
+    auth:
+      authenticator: headers_setter
+
+  # 라이브 복제(HOW-7): CP가 OTLP/JSON을 org별로 쪼개 Redis에 publish한다.
+  # WS fan-out은 설계 §6 5단계.
+  otlp_http/live:
+    metrics_endpoint: http://obsplane:8443/internal/live-ingest
+    encoding: json
+    # 라이브 뷰는 소실 가능한 사본이다. 재시도로 수집 경로를 막지 않는다.
+    retry_on_failure:
+      enabled: false
+    sending_queue:
+      enabled: false
+
+service:
+  extensions: [health_check, klaroauth, headers_setter, headers_setter/vm]
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, klarotenant, batch]
+      exporters: [prometheus_remote_write/vm, otlp_http/live]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, klarotenant, batch]
+      exporters: [otlp_grpc/tempo]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, klarotenant, batch]
+      exporters: [otlp_http/loki]
