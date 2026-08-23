@@ -102,3 +102,22 @@ SemVer. wrapper 공개 API(설정 키 이름, 함수 시그니처)의 breaking c
 | mTLS 옵션 | `klaro_apm/tracing.py` (`_build_channel_credentials`) |
 | 초기화/샘플링/배치 | `klaro_apm/tracing.py` (`init`, `build_tracer_provider`) |
 | FastAPI 헬퍼 | `klaro_apm/fastapi.py` (`init_fastapi`) |
+
+## 10. Node 구현 매핑
+
+| 계약 항목 | Node 구현 위치 |
+|---|---|
+| 설정 로딩 | `src/config.ts` (`resolveConfig`) |
+| 인증 헤더 | `otlpHeaders()` → `buildMetadata()`(`src/tracing.ts`, `grpc.Metadata`로 변환) |
+| host_ident 정규화 | `src/hostIdent.ts` (`resolveHostIdent`) |
+| mTLS 옵션 | `src/tracing.ts` (`buildChannelCredentials`) |
+| 초기화/샘플링/배치 | `src/tracing.ts` (`init`, `buildTracerProvider`) |
+| Express 헬퍼 | `src/express.ts` (`initExpress`) — `@opentelemetry/instrumentation-express`는 optional peer dependency |
+| Fastify 헬퍼 | `src/fastify.ts` (`initFastify`) — `@opentelemetry/instrumentation-fastify`는 optional peer dependency |
+
+**§5 drop-oldest 관련 Node 특이사항**: OTel JS 표준 `BatchSpanProcessor`는 큐 포화 시
+drop-newest(신규 span 거부)라서 §5가 요구하는 drop-oldest와 반대다. Python은 `deque(maxlen=N)`이
+자연히 drop-oldest라 재구현이 필요 없었지만, Node에는 동등한 표준 컴포넌트가 없어 §5의 "없는
+경우에만 최소 구현을 추가한다" 조항에 따라 `src/dropOldestBatchSpanProcessor.ts`
+(`DropOldestBatchSpanProcessor`)를 최소 구현으로 추가했다. 실제 네트워크 전송/실패 판정은 여전히
+주입된 `OTLPTraceExporter`에 전량 위임한다(재시도 로직 자체 구현 없음).
