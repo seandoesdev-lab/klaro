@@ -1,0 +1,65 @@
+{
+  "name": "@klaro/apm",
+  "version": "0.1.0",
+  "description": "klaro 상시 관측 플랫폼(Observability) 연동을 위한 OpenTelemetry thin wrapper SDK (Node.js)",
+  "license": "UNLICENSED",
+  "private": false,
+  "type": "commonjs",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./express": {
+      "types": "./dist/express.d.ts",
+      "default": "./dist/express.js"
+    },
+    "./fastify": {
+      "types": "./dist/fastify.d.ts",
+      "default": "./dist/fastify.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/core": "^2.10.0",
+    "@opentelemetry/resources": "^2.10.0",
+    "@opentelemetry/sdk-trace-base": "^2.10.0",
+    "@opentelemetry/sdk-trace-node": "^2.10.0",
+    "@opentelemetry/exporter-trace-otlp-grpc": "^0.221.0",
+    "@opentelemetry/instrumentation": "^0.221.0",
+    "@opentelemetry/instrumentation-http": "^0.221.0",
+    "@grpc/grpc-js": "^1.14.4"
+  },
+  "peerDependencies": {
+    "@opentelemetry/instrumentation-express": "^0.69.0",
+    "@opentelemetry/instrumentation-fastify": "^0.57.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentelemetry/instrumentation-express": {
+      "optional": true
+    },
+    "@opentelemetry/instrumentation-fastify": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@opentelemetry/instrumentation-express": "^0.69.0",
+    "@opentelemetry/instrumentation-fastify": "^0.57.0",
+    "@types/node": "^22.9.0",
+    "typescript": "^5.6.3",
+    "vitest": "^4.1.11"
+  }
+}

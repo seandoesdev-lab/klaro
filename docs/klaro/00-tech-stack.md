@@ -58,10 +58,12 @@
 - **Ephemeral 보장**: 소스 체크아웃은 tmpfs(RAM) 볼륨, Job 종료 시 Pod·볼륨 소멸. 디스크 미기록.
 
 ### 2.4 APM / Observability (S3)
+> **2026-08-23**: S3는 배포 리포트에 종속된 부가 데이터가 아니라 **독립된 상시 관측 제품(Datadog 유사, 최종 목표)**으로 승격. 아래 스택 선정은 유지되나, 조직 단위 ingestion 인증/쿼터·알림 룰 엔진·Explorer 조회 API는 별도 아키텍처 설계에서 확정한다(§6).
 - **표준**: OpenTelemetry (metrics/traces/logs).
-- **SDK 래핑**: `klaro-apm` npm(Node) / PyPI(FastAPI) / Maven(Spring Boot) — OTel 자동계측 + klaro 익스포터.
-- **수집기**: OTel Collector (게이트웨이) → VictoriaMetrics(메트릭) / Tempo(트레이스) / Loki(로그). 전부 셀프호스팅.
+- **SDK 래핑**: `klaro-apm` npm(Node) / PyPI(FastAPI) / Maven(Spring Boot) — OTel 자동계측 + klaro 익스포터. 운영 서비스에 상시 설치되는 것을 전제로 배포·버전관리 전략 필요.
+- **수집기**: OTel Collector (게이트웨이) → VictoriaMetrics(메트릭) / Tempo(트레이스) / Loki(로그). 전부 셀프호스팅. 잡 기반이 아니라 **상시 가동**.
 - **전송**: OTLP over gRPC + mTLS.
+- **알림/조회(신규 스코프)**: 임계치 기반 알림 룰 엔진, 메트릭/트레이스/로그 탐색(Explorer) 쿼리 API — 자체 구현 vs Grafana(Alerting/Explore) 재사용 결정 필요.
 
 ### 2.5 Report Aggregator (S4)
 - **집계**: 잡 완료 이벤트 → 배치 워커가 부하·스캔·APM 데이터 조인.
@@ -123,3 +125,6 @@
 3. **큐**: NATS JetStream(경량) vs Kafka — 과금 이벤트 재처리 요구 수준.
 4. **Bedrock 모델/리전**: 사용할 Claude 모델과 Bedrock 리전, 토큰 예산 상한.
 5. **테넌트 격리**: RLS(공용 DB) vs 스키마/DB 분리(Enterprise 전용 DB 요구와 연계).
+6. **(신규) 상시 관측 플랫폼(S3) 과금 모델**: 호스트 수·데이터 수집량(GB)·리텐션 기간 기준 과금 축을 배포 리포트의 VU-Minutes 과금과 어떻게 병행할지.
+7. **(신규) 알림/룰 엔진**: 자체 구현 vs Grafana Alerting 등 기존 OSS 재사용.
+8. **(신규) 관측 수집 인증 단위**: project 단위 `ingest_token` → 조직(org) 단위 API 키 + 쿼터로 승격 범위.

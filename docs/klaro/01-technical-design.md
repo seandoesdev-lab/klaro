@@ -44,7 +44,9 @@
 ### 통신 규약
 - **클라이언트 ↔ Control Plane**: REST/JSON(제어), WebSocket(실시간 메트릭 구독).
 - **Control Plane ↔ Worker**: 잡 디스패치는 큐, 제어/하트비트는 gRPC, 메트릭 역류는 WS/OTLP.
-- **APM SDK ↔ Collector**: OTLP over gRPC, **mTLS 필수**.
+- **APM SDK ↔ Collector**: OTLP over gRPC, **mTLS 필수**. 이 경로는 부하/스캔 잡과 독립적으로 상시 연결된다(§2.4).
+
+> **제품 구조**: klaro는 ① on-demand 배포 적합성 리포트(부하+스캔+APM 스냅샷 조인)와 ② 상시 관측 플랫폼(S3, Datadog 유사 최종 목표)의 두 흐름으로 나뉜다. 위 다이어그램의 APM SDK→Collector→VictoriaMetrics/Tempo/Loki 경로는 ②에 속하며, Report Aggregator는 이 저장소를 조회하는 소비자다.
 
 ---
 
@@ -108,6 +110,8 @@ PENDING → VALIDATING → QUEUED → PROVISIONING → RUNNING → AGGREGATING �
 
 ### 2.4 APM / Observability (S3)
 
+> **2026-08-23 결정**: S3는 배포 리포트(S4)에 종속된 스냅샷 수집 기능이 아니라 **독립된 상시 관측 제품(최종 목표: Datadog 유사 서비스)**으로 승격한다. 즉 SDK 설치·데이터 수집·저장·조회·알림은 특정 부하 테스트/리포트 잡의 생명주기와 무관하게 **상시** 동작하며, 배포 리포트는 이 플랫폼의 데이터를 "리포트 생성 시점 기준 특정 구간 스냅샷"으로 조회해 소비하는 하나의 소비자일 뿐이다. 아래 §2.4는 현재 MVP(리포트용 스냅샷 수집) 스코프를 기술하며, 상시 플랫폼 설계는 그 아래 **[상시 관측 플랫폼 아키텍처]**에 이어 붙인다.
+
 **저오버헤드 목표 ([APM-01], ≤2%)**
 - OTel 자동계측 + 샘플링(트레이스 tail-based), 배치 익스포트로 오버헤드 최소화.
 - SDK는 비동기 큐로 전송, 대상 앱 요청 경로 블로킹 금지.
@@ -118,6 +122,21 @@ PENDING → VALIDATING → QUEUED → PROVISIONING → RUNNING → AGGREGATING �
 
 **병목 트레이스 ([APM-03])**: 응답 ≥3초 트랜잭션을 span 트리로 표시, 느린 DB 쿼리/함수 하이라이트.
 
+> **[APM-01/02/03의 위상]**: 세 요구는 특정 기능이 아니라 상시 관측 플랫폼 **전역 비기능 요구(NFR)**다(재번호 없이 유지 — 아키텍처 설계 확정). 리포트 스냅샷이 아닌 상시 파이프라인 전체에 적용된다.
+
+**[상시 관측 플랫폼 아키텍처] (2026-08-23 확정 — 상세 `_workspace/05_architect_observability-design.md`)**
+
+위 MVP 서술은 리포트용 스냅샷 수집(project 단위 `apm_agents.ingest_token`, Postgres 저장) 스코프다. 상시 플랫폼은 아래로 확정하며, MVP 경로는 리포트 스냅샷 소비 경계(O10)로 존치하고 상시 경로와 **공존**한다.
+
+- **서비스 분리**: 상시 관측은 신규 `services/observability/`(Go/Gin)로 S1(`services/load-test/`)에서 분리. 근거 = 생명주기 상반(잡 버스트·idle=0 ↔ 24/7 상시)·폭발 반경 격리·독립 스케일. **"워커 idle=0" 불변식은 S1 잡 워커에만 적용**되며, 관측 컴포넌트(Collector/VM/Tempo/Loki/obsplane)는 상시 가동이 정상이다.
+- **수집 파이프라인 [OBS-01]**: SDK(OTel, mTLS) → **OTel Collector(gateway)** → metrics=VictoriaMetrics / traces=Tempo / logs=Loki. Collector가 org 키 인증·쿼터 집행·테넌트 라우팅·live 복제의 단일 종단점. **시계열은 RDB 밖**(Postgres는 참조/메타만) — MVP의 Postgres 저장을 상시 경로에서 복원.
+- **org 인증/쿼터 [OBS-02]**: project `ingest_token` → **org 단위 관측 키**(해시 저장·1회 노출·라벨 태깅·로테이션 grace). 쿼터 = 활성 호스트수(primary) + 수집량 GB(secondary).
+- **테넌트 격리**: 각 백엔드 native 멀티테넌시를 org로 키잉(VM `AccountID`, Tempo/Loki `X-Scope-OrgID`). CP만 테넌트 헤더 설정(RLS 해석 org 파생).
+- **알림 [OBS-06/07]**: `alert_rules`(Postgres) → **vmalert** 룰그룹 렌더 → 발동 webhook → `alert_events` + Notifier(MailHog/Slack 스텁, S1 공유). MVP는 메트릭 알림.
+- **Explorer [OBS-03/04/05]**: 자체 얇은 쿼리 API가 VM/Tempo/Loki에 프록시하되 **서버 사이드 org 매처 강제**. 라이브는 Collector→Redis pub/sub→WS fan-out(≤2초, S1 Signaler 재사용).
+- **리텐션 [OBS-08]**: 신호별 개별 보존(plans 확장) + CP 배치 삭제 잡. 다운샘플링은 OSS 미지원으로 이연.
+- **과금**: 관측 미터(호스트수 + 수집 GB) 신설, 기존 VU-Minutes와 병행([04-cost-model.md §6](./04-cost-model.md)).
+
 ### 2.5 Report Aggregator (S4)
 
 - 잡 `AGGREGATING` 이벤트 → 배치 워커가 부하 요약 + 스캔 findings + APM 메트릭 조인.
@@ -125,6 +144,7 @@ PENDING → VALIDATING → QUEUED → PROVISIONING → RUNNING → AGGREGATING �
 - **AI 요약**: 구조화 JSON(한계 VU, 병목 엔드포인트, top 느린 쿼리) → **AWS Bedrock(Claude)** → 자연어 문단. (유일한 유비용 항목 — 토큰 기반)
 - **PDF**: 헤드리스 Chromium으로 리포트 페이지 렌더 → **MinIO(S3 호환)** 저장.
 - **공유 링크 ([RP-04])**: 서명 URL + 비밀번호(해시) + 만료/폐기.
+- **APM 스냅샷 소비 [OBS-10]**: 리포트는 상시 관측 플랫폼의 데이터를 **리포트 시점 구간 스냅샷**으로 Explorer 경로를 통해 조회·소비할 뿐 소유·저장하지 않는다. 상시 수집/보존은 리포트 성패와 무관하게 지속된다.
 
 ---
 

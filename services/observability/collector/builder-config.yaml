@@ -1,0 +1,52 @@
+# OpenTelemetry Collector Builder (ocb) manifest for the klaro ingest gateway.
+#
+# A custom distribution exists for one reason: authenticating OTLP against the
+# klaro control plane needs a component that does not exist upstream. Everything
+# else here is stock OSS, so the distribution stays small and easy to bump.
+#
+# Build:  go run go.opentelemetry.io/collector/cmd/builder@v0.159.0 --config builder-config.yaml
+# (the Dockerfile in this directory does exactly that)
+dist:
+  name: klaro-otelcol
+  description: klaro observability ingest gateway (OTLP -> VictoriaMetrics / Tempo / Loki)
+  output_path: ./_build
+  version: 0.1.0
+  otelcol_version: 0.159.0
+
+extensions:
+  # klaroauth resolves the org key against the control plane and puts the
+  # resulting tenant on the request context.
+  - gomod: github.com/klaro/observability/collector v0.0.0
+    import: github.com/klaro/observability/collector/klaroauth
+    name: klaroauth
+  # headers_setter turns that context value into the X-Scope-OrgID header Tempo
+  # and Loki use for their own tenancy.
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/headerssetterextension v0.159.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/healthcheckextension v0.159.0
+
+receivers:
+  - gomod: go.opentelemetry.io/collector/receiver/otlpreceiver v0.159.0
+
+processors:
+  - gomod: go.opentelemetry.io/collector/processor/memorylimiterprocessor v0.159.0
+  - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.159.0
+  # klarotenant stamps the resolved tenant onto the data itself, which is how
+  # VictoriaMetrics routes a multitenant write.
+  - gomod: github.com/klaro/observability/collector v0.0.0
+    import: github.com/klaro/observability/collector/klarotenant
+    name: klarotenant
+  # klarousage counts volume and host identities per org for billing. It sits at
+  # the gateway because that is the only place all three signals pass through.
+  - gomod: github.com/klaro/observability/collector v0.0.0
+    import: github.com/klaro/observability/collector/klarousage
+    name: klarousage
+
+exporters:
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/prometheusremotewriteexporter v0.159.0
+  - gomod: go.opentelemetry.io/collector/exporter/otlpexporter v0.159.0
+  - gomod: go.opentelemetry.io/collector/exporter/otlphttpexporter v0.159.0
+  - gomod: go.opentelemetry.io/collector/exporter/debugexporter v0.159.0
+
+# The custom components live in this repository, not on a proxy.
+replaces:
+  - github.com/klaro/observability/collector => ../
