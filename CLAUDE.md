@@ -30,12 +30,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 제품 개요
 
-**klaro** — 배포 전 "지금 배포해도 되는가?"에 답하는 SaaS. 네 가지를 하나의 배포 적합성 리포트로 종합한다:
+**klaro**는 두 축으로 구성된다:
 
-1. **부하 테스트 (S1)** — k6 기반, 동적 워커 스케일아웃, 서킷 브레이커로 대상 서버 보호
-2. **보안 스캔 (S2)** — SAST(Semgrep+osv-scanner) / DAST(OWASP ZAP), 소스는 Ephemeral(RAM) 처리
-3. **APM/관측성 (S3)** — OpenTelemetry 기반, VictoriaMetrics/Tempo/Loki 저장
-4. **리포트 (S4)** — 위 결과를 조인 → **AWS Bedrock(Claude)**로 AI 요약 → PDF(MinIO 저장)
+1. **배포 적합성 SaaS** — 배포 전 "지금 배포해도 되는가?"에 답한다. 세 가지를 하나의 배포 적합성 리포트로 종합:
+   - **부하 테스트 (S1)** — k6 기반, 동적 워커 스케일아웃, 서킷 브레이커로 대상 서버 보호
+   - **보안 스캔 (S2)** — SAST(Semgrep+osv-scanner) / DAST(OWASP ZAP), 소스는 Ephemeral(RAM) 처리
+   - **리포트 (S4)** — 부하+스캔(+APM 스냅샷) 조인 → **AWS Bedrock(Claude)**로 AI 요약 → PDF(MinIO 저장)
+2. **상시 관측 플랫폼 (S3, APM/Observability)** — **최종 목표는 Datadog 유사 서비스.** 배포 시점 스냅샷이 아니라, 운영 중인 서비스에 OpenTelemetry SDK를 상시 설치해 메트릭·트레이스·로그를 지속적으로 수집·저장·조회·알림한다. 배포 적합성 리포트는 이 플랫폼이 보유한 데이터를 "특정 시간 구간 스냅샷"으로 소비하는 관계다.
+
+> **2026-08-23 결정**: S3(APM)을 배포 리포트에 종속된 스냅샷 기능이 아니라 **독립된 상시 관측 제품**으로 승격. 데이터 모델(장기 보존 시계열 vs 잡 단위 스냅샷)·과금 모델(호스트/데이터량 기준 vs VU-Minutes)·인프라(상시 가동 Collector vs on-demand 워커)가 배포 리포트 흐름과 근본적으로 다르므로, 아키텍처 설계 단계에서 별도 서비스 경계로 재설계한다. 상세는 `docs/klaro/01-technical-design.md §2.4`.
 
 ## 아키텍처 핵심 (구현 시 반드시 준수)
 
@@ -74,6 +77,8 @@ MinIO는 S3 API 호환이므로, 스토리지 접근은 S3 SDK로 작성해 프�
 - **메시지 큐**: NATS JetStream vs Kafka
 - **Bedrock**: 사용할 Claude 모델·리전·토큰 예산 상한
 - **테넌트 격리**: 공용 DB + RLS vs 스키마/DB 분리(Enterprise)
+> **2026-08-23 아키텍처 확정**: 상시 관측 플랫폼(S3)의 서비스 경계·데이터 모델·과금·알림·다운샘플링·SDK 배포 전략은 architect 설계로 확정됨. 상세는 `_workspace/05_architect_observability-design.md` §7(사용자 확정 결과), 반영 문서는 `docs/klaro/01-technical-design.md §2.4` · `02-data-model.md §2.5/§2.7/§3` · `03-api-spec.md §3.7`. 핵심: 신규 `services/observability/`(Go/Gin) 분리, org 단위 관측 키+쿼터(호스트수+GB, 초과 시 차단 없이 overage 과금), 알림=vmalert, 다운샘플링=vmalert recording rule(메트릭 한정), 대시보드(OBS-09)는 M2+ 이연, SDK(`klaro-apm`)는 thin OTel wrapper로 설계 완료(실 구현은 별도 마일스톤).
+- **(남은 구현 리스크, 결정 아님)**: vmalert의 멀티테넌트 recording rule 격리 평가 동작을 backend-builder 착수 전 스파이크로 검증 필요(설계 §HOW-10). MVP `apm_spans/apm_logs`(Postgres) → VM/Tempo/Loki 이행은 상시 경로 안정 확인 후 실행.
 
 이들이 정해지기 전에는 스택 특정 코드를 임의로 만들지 말고, 결정을 먼저 확인하거나 제안한다.
 
@@ -95,3 +100,5 @@ MinIO는 S3 API 호환이므로, 스토리지 접근은 S3 SDK로 작성해 프�
 | 2026-07-19 | 초기 구성 (통합 하네스: 에이전트 6 + 스킬 6 + 오케스트레이터 klaro-build) | 전체 | 명세→구현→검증 개발 하네스 구축 |
 | 2026-07-19 | 초기 구성 (designer/qa 에이전트 + dashboard-design 스킬 + orchestrator) | 전체 | 부하 테스트 대시보드 프런트엔드 하네스 구축 |
 | 2026-07-19 | "앱 셸 골격 복제(필수)" 규칙 추가 | skills/klaro-dashboard-design | 1차 산출물이 프로토타입 상단바+사이드바 셸을 복제하지 않아 시각적으로 달라 보인 피드백 반영 |
+| 2026-08-23 | S3(APM)을 독립 상시 관측 제품으로 승격 결정(제품 개요·미확정 사항 갱신) | CLAUDE.md, docs/klaro/*.md | 최종 목표가 Datadog 유사 서비스로 확인됨. 배포 리포트(스냅샷)와 상시 관측(장기 시계열)의 제품·데이터·과금 모델이 근본적으로 달라 문서 프레이밍부터 분리 |
+| 2026-08-23 | 상시 관측 플랫폼(S3) 요구사항 계약(OBS-01~10) + 아키텍처 설계 확정(신규 services/observability/ 분리, 9+2건 HOW 결정) | _workspace/04·05, docs/klaro/01·02·03-*.md | spec-analyst→architect 하네스 파이프라인 실행. 사용자가 쿼터 초과=전 플랜 overage 과금(권고와 다름), 다운샘플링·SDK 배포전략은 이연 대신 즉시 설계를 선택 |

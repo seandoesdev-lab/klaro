@@ -69,10 +69,19 @@
 | Scan | GET `/scans/:id` | 상세/상태 | member |
 | Scan | GET `/scans/:id/findings` | findings 목록 | member |
 | Scan | PATCH `/scans/:id/findings/:findingId` | 오탐 무시/상태 변경 | member |
-| APM | GET `/projects/:id/apm/agents` | 에이전트 목록 | member |
-| APM | POST `/projects/:id/apm/agents` | 에이전트 등록(ingest token) | member |
-| APM | GET `/projects/:id/apm/traces` | 트레이스 조회(느린 트랜잭션) | member |
-| APM | GET `/projects/:id/apm/logs` | 로그 조회 | member |
+| APM(MVP 스냅샷) | GET `/projects/:id/apm/agents` | 에이전트 목록 | member |
+| APM(MVP 스냅샷) | POST `/projects/:id/apm/agents` | 에이전트 등록(ingest token) | member |
+| APM(MVP 스냅샷) | GET `/projects/:id/apm/traces` | 트레이스 조회(느린 트랜잭션) | member |
+| APM(MVP 스냅샷) | GET `/projects/:id/apm/logs` | 로그 조회 | member |
+| 관측(상시) | POST/GET `/orgs/:orgId/obs/keys` · rotate · DELETE | 관측 API 키 발급/폐기/로테이션 | admin |
+| 관측(상시) | GET `/orgs/:orgId/obs/quota` | 수집 쿼터 조회 | member |
+| 관측(상시) | GET `/orgs/:orgId/obs/metrics/query` | 메트릭 Explorer | member |
+| 관측(상시) | GET `/orgs/:orgId/obs/traces` · `/:traceId` | 트레이스 Explorer | member |
+| 관측(상시) | GET `/orgs/:orgId/obs/logs` | 로그 Explorer | member |
+| 관측(상시) | CRUD `/orgs/:orgId/obs/alert-rules` | 알림 룰 | member |
+| 관측(상시) | GET `/orgs/:orgId/obs/alert-events` | 알림 이력 | member |
+| 관측(상시) | CRUD `/orgs/:orgId/obs/dashboards` | 대시보드/패널 | member |
+| 관측(상시) | WS `/orgs/:orgId/obs/live` | 라이브 스트림 구독 | member |
 | Report | GET `/projects/:id/reports` | 리포트 목록 | member |
 | Report | POST `/projects/:id/reports` | 리포트 생성 | member |
 | Report | GET `/reports/:id` | 상세 | member |
@@ -281,6 +290,69 @@ Header: X-Report-Password: s3cret
 
 **PATCH** `/endpoints/:id` — 수정 / **DELETE** `/endpoints/:id` — 삭제(진행 중 테스트가 참조하면 `409`).
 
+### 3.7 상시 관측 플랫폼 API (2026-08-23 확정 — 상세 `_workspace/05_architect_observability-design.md`)
+
+> **MVP와의 경계 [OBS-10]**: §2의 `GET/POST /projects/:id/apm/*`(project 단위, Postgres)는 **리포트용 스냅샷 조회로 존치**하고, 아래 org 단위 상시 API와 **공존**한다(대체 아님). 상시 API는 `services/observability/`(Go/Gin) 신규 서비스가 제공하며 모든 경로 org 스코프(RLS). 시계열 원본은 VictoriaMetrics/Tempo/Loki(각 백엔드 native 테넌트=org).
+
+**수집(SDK↔Collector)**: OTLP over gRPC + **mTLS 필수**. 헤더 `klaro-obs-key: <org 키 시크릿>`. Collector가 키 검증·쿼터 집행·테넌트 라우팅.
+
+**POST** `/orgs/:orgId/obs/keys` — 관측 API 키 발급 [OBS-02]
+```json
+// req
+{ "name": "prod-cluster", "scope_label": { "env": "prod" } }
+// res 201 (secret은 1회만 노출)
+{ "id": "uuid", "name": "prod-cluster", "key_prefix": "obsk_ab12", "secret": "obsk_ab12cd…full", "status": "active" }
+```
+**POST** `/orgs/:orgId/obs/keys/:keyId/rotate` → `{ "id", "key_prefix", "secret", "grace_until" }` (구키는 grace 후 거부)
+**DELETE** `/orgs/:orgId/obs/keys/:keyId` → 204 (이후 구키 수집 401)
+
+**GET** `/orgs/:orgId/obs/quota` — 수집 쿼터 [OBS-02]
+```json
+{ "active_hosts": 12, "host_limit": 50, "ingest_gb": 3.4, "ingest_limit_gb": 100, "period": { "start": "2026-08-01", "end": "2026-08-31" } }
+```
+
+**GET** `/orgs/:orgId/obs/metrics/query` — 메트릭 Explorer [OBS-03] · `?from&to&filter&agg&step`
+```json
+{ "series": [ { "labels": { "service": "api", "endpoint": "/orders" }, "points": [ [1690000000, 12.5], [1690000060, 13.1] ] } ] }
+```
+
+**GET** `/orgs/:orgId/obs/traces` — 트레이스 Explorer [OBS-04] · `?from&to&service&min_duration_ms=3000`
+```json
+{ "data": [ { "trace_id": "abc", "root_service": "api-gateway", "duration_ms": 3480, "start": "2026-08-23T00:00:00Z" } ] }
+```
+**GET** `/orgs/:orgId/obs/traces/:traceId` → span 워터폴
+```json
+{ "trace_id": "abc", "spans": [ { "span_id": "s1", "parent_span_id": null, "service": "api-gateway", "name": "GET /orders", "duration_ms": 3480, "status": "ok" }, { "span_id": "s2", "parent_span_id": "s1", "service": "orders-svc", "name": "SELECT …", "duration_ms": 3200, "status": "ok" } ] }
+```
+
+**GET** `/orgs/:orgId/obs/logs` — 로그 Explorer [OBS-05] · `?from&to&filter&query&limit`
+```json
+{ "data": [ { "ts": "2026-08-23T00:00:00Z", "level": "error", "message": "upstream timeout", "labels": { "service": "api" } } ], "next": "cursor" }
+```
+
+**POST/GET/PATCH/DELETE** `/orgs/:orgId/obs/alert-rules` — 알림 룰 CRUD [OBS-06]
+```json
+// req
+{ "name": "high-error-rate", "signal": "metric", "query": "rate(http_errors[5m])", "comparator": "gt", "threshold": 0.05, "for_duration_sec": 120, "severity": "critical", "channels": [ { "type": "slack", "target": "#alerts" } ], "enabled": true }
+// res 201 (미지원 signal/comparator → 422)
+{ "id": "uuid", "name": "high-error-rate", "signal": "metric", "enabled": true }
+```
+
+**GET** `/orgs/:orgId/obs/alert-events` — 알림 이력 [OBS-07] · `?state&from&to`
+```json
+{ "data": [ { "rule_id": "uuid", "state": "firing", "value": 0.08, "started_at": "2026-08-23T00:05:00Z", "resolved_at": null } ] }
+```
+
+**CRUD** `/orgs/:orgId/obs/dashboards` — 대시보드/패널 [OBS-09] (마일스톤 이연 후보)
+```json
+{ "id": "uuid", "name": "API Overview", "spec": { "panels": [ { "title": "RPS", "viz": "line", "query": { "signal": "metric", "expr": "rate(http_reqs[1m])" }, "layout": { "x": 0, "y": 0, "w": 6, "h": 4 } } ] } }
+```
+
+**WS** `/orgs/:orgId/obs/live?stream=<metric|service>` — 라이브 구독 [OBS-01/APM-02], ≤2초 주기
+```json
+{ "ts": "2026-08-23T00:00:00Z", "stream": "metric", "points": [ { "labels": { "service": "api" }, "value": 42.0 } ] }
+```
+
 ---
 
 ## 4. 웹훅
@@ -303,3 +375,5 @@ service WorkerControl {
 }
 ```
 전 구간 **mTLS**.
+
+> **관측 수집 경로(내부)**: 상시 관측은 위 WorkerControl과 별개로 SDK→OTel Collector(OTLP/gRPC, mTLS)→VM/Tempo/Loki 파이프라인을 사용한다. Collector↔CP 내부 인터페이스(`/internal/authz/ingest-key`, `/internal/live-ingest`, `/internal/alerts/webhook`)도 mTLS. 상세 `_workspace/05_architect_observability-design.md §4`.
