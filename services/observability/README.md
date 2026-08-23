@@ -149,6 +149,12 @@ DDL과 `CREATE ROLE`은 앱 롤 권한 밖이므로 **마이그레이션은 별�
 
 `WS /orgs/:orgId/obs/live?stream=<metric|service>` — 프레임은 `{ts, stream, points:[{labels, value}]}`.
 
+- **자격증명은 헤더 또는 서브프로토콜로 온다.** 브라우저 WebSocket API는 핸드셰이크에
+  헤더를 붙일 수 없어서, 이 라우트 하나만 `Sec-WebSocket-Protocol: klaro-bearer, <토큰>`도
+  읽는다(`tenancy.SubprotocolToken`, 라우트 단위 opt-in). 헤더가 있으면 헤더가 이기고,
+  서버는 선택한 서브프로토콜을 응답에 에코한다 — 에코가 없으면 브라우저가 인증에 성공한
+  연결을 스스로 끊는다. 쿼리 파라미터는 받지 않는다: URL에 실린 토큰은 프록시 로그·히스토리·
+  Referer에 남고, 여기서 토큰 하나는 org 하나다.
 - **인가 실패는 close 코드로 알린다.** 브라우저 WebSocket API는 핸드셰이크 상태코드를
   노출하지 않아서(거절되면 그냥 1006), 다른 org를 요청한 인증된 클라이언트는 소켓을
   받은 뒤 **4403**으로 닫힌다. 자격증명이 아예 없으면 소켓 없이 401이다 —
@@ -388,6 +394,7 @@ Grafana 임베드가 아니므로 패널이 외부에서 주소 지정될 필요
 | `OBS_JWT_LEEWAY_SEC` | `60` | `exp`/`nbf`/`iat` 시계 오차 허용 |
 | `OBS_DEV_AUTH` | `false` | 개발 인증 스텁을 켠다. **프로덕션 프로파일에서는 금지** |
 | `OBS_DEV_TOKEN` / `OBS_DEV_ORG_ID` / `OBS_DEV_ROLE` | — / — / `owner` | 스텁 설정. `OBS_DEV_AUTH`일 때 앞 둘은 필수 |
+| `OBS_DEV_CORS_ORIGINS` | — | 교차출처 허용 오리진(콤마 구분, `scheme://host[:port]`). 대시보드 로컬 개발용. **프로덕션 프로파일에서는 금지** |
 
 TLS 번들도 없고 `OBS_INTERNAL_INSECURE`도 아니면 내부 리스너는 **뜨지 않는다**(로그로 알린다).
 mTLS가 계약이므로, 번들이 없다고 평문으로 조용히 내려앉지 않는다.
@@ -578,7 +585,7 @@ MSYS_NO_PATHCONV=1 docker run --rm --network deploy_default -v "$(pwd -W):/src" 
   -e E2E_REDIS_ADDR=redis:6379 \
   -e E2E_ROLLUPS=1 \
   -e E2E_ORG_ID=00000000-0000-0000-0000-000000000001 \
-  -e E2E_DEV_TOKEN=dev -e E2E_OBS_KEY="<발급한 secret>" \
+  -e E2E_DEV_TOKEN="$TOKEN" -e E2E_OBS_KEY="<발급한 secret>" \
   golang:1.25 go test -tags e2e -count=1 -timeout 10m -v -run TestE2E ./internal/api/
 ```
 
@@ -616,7 +623,7 @@ docker compose exec -T postgres psql -U klaro -d klaro_obs \
   -c "INSERT INTO organizations (id,name,plan_code) VALUES ('$ORG','dev','pro') ON CONFLICT (id) DO UPDATE SET plan_code='pro'"
 
 # 키 발급 — secret은 이 응답에만 있다.
-curl -s -X POST localhost:8090/orgs/$ORG/obs/keys -H 'Authorization: Bearer dev' \
+curl -s -X POST localhost:8090/orgs/$ORG/obs/keys -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -d '{"name":"smoke"}'
 
 # SDK 대신 OTLP를 직접 밀어넣는다.
@@ -624,11 +631,11 @@ curl -s -X POST localhost:4318/v1/metrics -H 'Content-Type: application/json' \
   -H "klaro-obs-key: <secret>" --data-binary @metrics.json
 
 # Explorer로 되읽기 — org는 서버가 주입하므로 클라이언트가 넘길 것이 없다.
-curl -s -H 'Authorization: Bearer dev' \
+curl -s -H "Authorization: Bearer $TOKEN" \
   "localhost:8090/orgs/$ORG/obs/metrics/query?metric=klaro_smoke_total&step=60"
-curl -s -H 'Authorization: Bearer dev' \
+curl -s -H "Authorization: Bearer $TOKEN" \
   "localhost:8090/orgs/$ORG/obs/traces?service=checkout&min_duration_ms=1000"
-curl -s -H 'Authorization: Bearer dev' \
+curl -s -H "Authorization: Bearer $TOKEN" \
   "localhost:8090/orgs/$ORG/obs/logs?filter=service_name%3Dcheckout&limit=50"
 
 # 저장소를 직접 확인하고 싶으면(테넌트 번호는 /obs/tenant 로 확인)
@@ -636,7 +643,9 @@ curl -s "localhost:8481/select/1/prometheus/api/v1/query?query=klaro_smoke_total
 curl -s -H "X-Scope-OrgID: $ORG" localhost:3200/api/traces/<trace-id>
 ```
 
-라이브 소켓은 `ws://localhost:8090/orgs/$ORG/obs/live?stream=metric`이고, 그 밑의
+라이브 소켓은 `ws://localhost:8090/orgs/$ORG/obs/live?stream=metric`이다. 브라우저는
+핸드셰이크에 Authorization 헤더를 붙일 수 없으므로 `Sec-WebSocket-Protocol: klaro-bearer,<토큰>`으로
+보내고(위 "로컬 풀스택 실행" 참고), curl/Go 클라이언트는 헤더를 그대로 쓴다. 그 밑의
 Redis 채널은 `klaro:obs:live:<org>:metric`이다:
 `docker compose exec redis redis-cli psubscribe 'klaro:obs:live:*'`.
 
@@ -646,9 +655,9 @@ Redis 채널은 `klaro:obs:live:<org>:metric`이다:
 ```bash
 # 대시보드 저장 → 목록
 curl -s -X POST localhost:8090/orgs/$ORG/obs/dashboards \
-  -H 'Authorization: Bearer dev' -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"name":"checkout","spec":{"panels":[]}}'
-curl -s localhost:8090/orgs/$ORG/obs/dashboards -H 'Authorization: Bearer dev'
+curl -s localhost:8090/orgs/$ORG/obs/dashboards -H "Authorization: Bearer $TOKEN"
 
 # 리포트 스냅샷 (내부 플레인 — 개발 compose는 평문 8443)
 FROM=$(date -u -d '-15 min' +%Y-%m-%dT%H:%M:%SZ)
@@ -657,6 +666,97 @@ curl -s -X POST localhost:8443/internal/snapshot -H 'Content-Type: application/j
   -d "{\"org_id\":\"$ORG\",\"from\":\"$FROM\",\"to\":\"$TO\",
        \"metrics\":[{\"key\":\"latency\",\"metric\":\"klaro_smoke_total\",\"agg\":\"avg\"}]}"
 ```
+
+## 로컬 풀스택 실행 (백엔드 + 대시보드)
+
+브라우저에서 실제 데이터가 보이는 상태까지 한 번에 가는 경로다. 위 "로컬 기동"이
+백엔드만 띄우는 절차라면, 이쪽은 `apps/observability-dashboard`까지 연결한다.
+
+```bash
+# 전부 한 번에: compose 기동 → 시드 → 합성 메트릭 주입 → REST/WS 확인 → next build
+./scripts/e2e-fullstack.sh
+
+# 그 다음 대시보드 개발 서버
+cd apps/observability-dashboard && npm run dev     # http://localhost:3100/live
+```
+
+수동으로 같은 일을 하려면 네 단계다.
+
+```bash
+# 1) 스택 기동 — obsplane 포함 11개 서비스
+cd services/observability/deploy && docker compose up --build -d
+
+# 2) org 시드 + JWT 발급 + 수집 키 발급 + 대시보드 .env.local 작성
+./scripts/seed-dev.sh
+#   stdout: KLARO_ORG_ID / KLARO_OBS_TOKEN / KLARO_OBS_KEY
+#   파일:   apps/observability-dashboard/.env.local  (gitignore 대상)
+
+# 3) 합성 메트릭 1건 주입 + 라이브 WS·Explorer 확인 (위 3개 값을 환경변수로)
+eval "$(./scripts/seed-dev.sh)" && node ../../../scripts/verify-live.mjs
+
+# 4) 대시보드
+cd ../../../apps/observability-dashboard && npm run dev
+```
+
+| 주소 | 무엇 |
+|------|------|
+| http://localhost:3100 | 대시보드 (Next dev) |
+| http://localhost:8090 | obsplane 공개 API (REST + 라이브 WS) |
+| http://localhost:8443 | obsplane 내부 평면 (개발 평문) |
+| http://localhost:4317 · :4318 | Collector OTLP (gRPC · HTTP) |
+| http://localhost:8481 | vmselect (저장소 직접 확인용) |
+| http://localhost:3101 | Loki — **호스트 포트 3101**. 3100은 대시보드가 쓴다 |
+| http://localhost:8880 | vmalert UI |
+| http://localhost:8025 | MailHog UI (발송된 알림) |
+
+### 이 경로에서 실제로 막혀 있던 세 가지
+
+프런트와 백엔드가 각자 정상인데도 브라우저에서는 아무것도 보이지 않는 상태였다.
+원인은 서로 다른 세 개이고, 브라우저에서는 셋 다 "백엔드 없음"처럼 보였다.
+
+1. **WebSocket 자격증명.** 브라우저 WebSocket API는 핸드셰이크에 헤더를 붙일 수 없다.
+   그래서 라이브 소켓은 `Sec-WebSocket-Protocol: klaro-bearer, <토큰>`도 읽는다
+   (`tenancy.SubprotocolToken`). 쿼리 파라미터가 아닌 이유는 하나다 — URL에 실린
+   토큰은 경로상 모든 프록시의 액세스 로그와 브라우저 히스토리, Referer에 남고,
+   여기서 토큰 하나는 org 하나다. 이 확장은 **라우트 단위 opt-in**이라
+   (`tenancy.AllowWSSubprotocolCredential`, `getLive`에서만 호출) 나머지 REST
+   라우트는 여전히 Authorization 헤더만 읽는다. 헤더가 있으면 헤더가 이긴다.
+   서버는 선택한 서브프로토콜을 **응답에 에코**한다(RFC 6455 §4.2.2). 에코가 없으면
+   브라우저는 인증에 성공한 연결을 스스로 끊는다 — 서버 장애처럼 보이는 실패다.
+   토큰은 되돌려주지 않는다; 에코하는 값은 `klaro-bearer` 하나다.
+2. **교차 출처.** 대시보드(:3100)와 obsplane(:8090)은 다른 오리진이라 모든 fetch가
+   핸들러에 닿기도 전에 브라우저에서 막혔다. `OBS_DEV_CORS_ORIGINS`로 켜는
+   `api.DevCORS`가 이를 푼다 — 명시적 허용 목록만, 와일드카드 없음,
+   `Allow-Credentials`는 **보내지 않는다**(자격증명이 페이지가 직접 붙이는 Bearer
+   토큰이라 브라우저가 자동으로 실어 보낼 것이 없다 — 에코한 오리진 옆에서 이걸 켜는
+   것이 관대한 CORS를 위험하게 만드는 조합이다). 프리플라이트는 인증 **앞에서** 답한다 —
+   규격상 자격증명이 없는 요청이라 tenancy 미들웨어까지 보내면 모든 교차출처 호출이
+   401이 되고, 브라우저 콘솔에는 CORS 오류로만 보인다.
+   프로덕션 프로파일은 이 변수를 **거부**한다(`config.validateDevCORS`).
+3. **토큰이 없었다.** 대시보드가 보낼 유효한 JWT를 만드는 방법이 문서에 없었다.
+   `deploy/scripts/dev-token.mjs`가 HS256 개발 시크릿으로 `org_id`·`role`·
+   `exp`(`iss`/`aud` 포함) 토큰을 찍는다. 의존성 없이 node `crypto`만 쓴다.
+
+**개발 스텁(`OBS_DEV_AUTH`)을 쓰지 않는 이유**: 스텁은 검증기를 문자열 비교로 갈아
+끼우므로, 실제로 배포되는 JWT 경로가 로컬에서 한 번도 실행되지 않는다. compose는
+그래서 스텁 대신 `OBS_JWT_HS_SECRET`을 넣고, 개발도 프로덕션과 **같은 코드 경로**로
+인증한다. 스텁은 코드에 남아 있고 여전히 `OBS_DEV_AUTH`로만 켜진다.
+
+### 검증된 것 (실측)
+
+`./scripts/e2e-fullstack.sh`가 매번 다시 확인하는 항목이다.
+
+| 단계 | 확인 내용 |
+|------|-----------|
+| compose up | obsplane 포함 11개 서비스 기동 |
+| `/readyz` | 부팅 마이그레이션 후 Postgres 도달 가능 |
+| seed | org 행 + HS256 JWT + 수집 키, `.env.local` 작성 |
+| CORS | `OPTIONS` 프리플라이트가 자격증명 없이 204 + 오리진·Authorization 허용 |
+| 라이브 WS | 서브프로토콜 인증으로 핸드셰이크 성립 + `klaro-bearer` 에코 |
+| 수집 | Collector 경유 OTLP 1건(위조 `klaro.org_id` 포함) |
+| 라이브 프레임 | 열려 있던 소켓으로 도착, 내부 라우팅 라벨 미노출 |
+| Explorer | `/obs/metrics/query`가 샘플 반환 + 생성 쿼리에 org 매처 |
+| 프런트 | `next build` 통과 |
 
 ## Collector 배포판을 왜 직접 만드나
 
@@ -700,7 +800,12 @@ Tempo/Loki는 `otlp`/`otlphttp` 익스포터가 컨텍스트를 유지하므로 
 
 ## 알려진 제약 (의도된 것)
 
-- **인증은 개발 스텁**(고정 토큰 → 고정 org). JWT/OAuth/RBAC(`Org > Project > Resource`)는 후속.
+- **인증은 서명된 Bearer JWT**(HS256/RS256)다. 개발도 같은 경로를 쓴다 —
+  `deploy/scripts/dev-token.mjs`로 로컬 토큰을 발급한다. 고정 토큰 스텁은
+  `OBS_DEV_AUTH` 뒤에만 남아 있고 프로덕션 프로파일에서는 금지된다.
+  OAuth2 발급자 연동과 `Org > Project > Resource` 3단 인가는 후속이다.
+- **CORS는 개발 프로파일 전용**이다. 프로덕션 대시보드는 동일 오리진으로 서빙하거나
+  게이트웨이가 자체 정책을 갖는다 — obsplane에 두 번째 오리진 정책을 두지 않는다.
 - **개발 compose의 내부 홉은 평문**이다. obsplane은 `OBS_INTERNAL_INSECURE`, 게이트웨이는
   `klaroauth.tls.insecure`로 **명시적으로** 그렇게 요청해야 한다. 프로덕션 mTLS(SDK↔Collector
   포함)는 `deploy/otel-collector.prod.yaml` 오버레이가 켠다 — 위 "mTLS를 어디서 강제하나"
