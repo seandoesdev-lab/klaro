@@ -28,6 +28,11 @@ extensions:
       # (CLAUDE.md: 내부 mTLS 필수). insecure를 명시적으로 켜야만 평문이 되므로,
       # 번들이 없다고 조용히 강등되는 경로는 없다(klaroauth Validate).
       insecure: true
+    # 평문은 "암호화 없음"일 뿐 "인증 없음"이 아니다(F-3). CP 내부 평면은 검증된
+    # 클라이언트 인증서 또는 이 토큰 중 하나를 요구하므로 insecure일 때는 토큰이
+    # 필수다(klaroauth Validate가 기동 시 강제). 프로덕션 오버레이는 mTLS로
+    # 바꾸므로 거기서는 인증서가 이 자리를 대신한다.
+    internal_token: ${env:KLARO_INTERNAL_TOKEN}
 
   # ② Tempo·Loki 테넌시: 컨텍스트의 org를 X-Scope-OrgID 헤더로 옮긴다.
   headers_setter:
@@ -79,6 +84,9 @@ processors:
       # 개발 compose 전용. 프로덕션은 otel-collector.prod.yaml이 klaroauth와
       # 동일한 mTLS 번들로 덮어쓴다.
       insecure: true
+    # klaroauth와 같은 이유(F-3). 계량은 fire-and-forget이라 401이 조용히
+    # 누적되므로, 토큰 누락은 기동 시 실패로 잡는다(klarousage Validate).
+    internal_token: ${env:KLARO_INTERNAL_TOKEN}
 
   batch:
     # 라이브 대시보드 ≤2초(APM-02 / HOW-7)에 맞춘 플러시 주기.
@@ -130,6 +138,11 @@ exporters:
   otlp_http/live:
     metrics_endpoint: http://obsplane:8443/internal/live-ingest
     encoding: json
+    # 이 홉도 CP 내부 평면이므로 인증이 필요하다(F-3). 프로덕션 오버레이는
+    # mTLS 번들을 붙이지만 헤더를 지우지는 않는다 — CP는 둘 중 하나만 있으면
+    # 통과시키므로, 인증서 교체 중에도 라이브 복제가 끊기지 않는다.
+    headers:
+      Authorization: Bearer ${env:KLARO_INTERNAL_TOKEN}
     # 라이브 뷰는 소실 가능한 사본이다. 재시도로 수집 경로를 막지 않는다.
     retry_on_failure:
       enabled: false

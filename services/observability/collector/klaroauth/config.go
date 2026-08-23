@@ -14,6 +14,7 @@ package klaroauth
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
@@ -44,6 +45,16 @@ type Config struct {
 
 	// TLS is the client half of the internal mTLS hop.
 	TLS TLSConfig `mapstructure:"tls"`
+
+	// InternalToken is presented to the control plane as
+	// `Authorization: Bearer`. The internal plane authenticates every request
+	// independently of its transport, so this is what identifies the gateway
+	// when tls.insecure short-circuits the client certificate.
+	//
+	// InternalTokenFile is the same value read from a file, which is how a
+	// mounted secret arrives. Set one or the other, not both.
+	InternalToken     string `mapstructure:"internal_token"`
+	InternalTokenFile string `mapstructure:"internal_token_file"`
 }
 
 // TLSConfig locates the client certificate material for the control plane hop.
@@ -90,6 +101,17 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("%w: tls.ca_file, tls.cert_file and tls.key_file are all required for mTLS", ErrInvalidConfig)
 		}
 	}
+	if c.InternalToken != "" && c.InternalTokenFile != "" {
+		return fmt.Errorf("%w: set internal_token or internal_token_file, not both", ErrInvalidConfig)
+	}
+	// Without a client certificate the token is the only thing identifying this
+	// gateway to the control plane, which refuses an unauthenticated internal
+	// request. Failing here says so at startup instead of turning every authz
+	// call into a 401 and every batch into a drop.
+	if c.TLS.Insecure && c.InternalToken == "" && c.InternalTokenFile == "" {
+		return fmt.Errorf("%w: tls.insecure requires internal_token or internal_token_file: "+
+			"plaintext transport does not disable authentication on the control plane", ErrInvalidConfig)
+	}
 	for _, d := range []struct {
 		name  string
 		value time.Duration
@@ -103,6 +125,21 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// resolveInternalToken returns the token, reading the file form if that is what
+// was configured. The trailing newline a mounted secret or `echo` leaves behind
+// is trimmed: a token differing from the server's by one invisible byte fails
+// every request with a 401, which is a miserable thing to debug.
+func (c Config) resolveInternalToken() (string, error) {
+	if c.InternalTokenFile == "" {
+		return c.InternalToken, nil
+	}
+	b, err := os.ReadFile(c.InternalTokenFile)
+	if err != nil {
+		return "", fmt.Errorf("klaroauth: read internal_token_file: %w", err)
+	}
+	return strings.TrimRight(string(b), "\r\n"), nil
 }
 
 // withDefaults returns a copy with the unset fields filled in.

@@ -6,6 +6,12 @@
 # 개발 편의를 위해 내부 홉이 평문이다: obsplane은 OBS_INTERNAL_INSECURE로,
 # 게이트웨이는 klaroauth.tls.insecure로 명시적으로 그렇게 요청해야 한다.
 # 프로덕션은 두 곳 모두 mTLS 번들을 넣는다(CLAUDE.md: 내부 mTLS 필수).
+#
+# 평문이라도 인증은 살아 있다(F-3): 내부 평면의 모든 라우트는 검증된 클라이언트
+# 인증서 또는 KLARO_INTERNAL_TOKEN 중 하나를 요구한다. 그래서 obsplane·게이트웨이·
+# vmalert 세 곳이 같은 토큰을 공유한다 — 하나만 바꾸면 그 경로만 401이 된다.
+# 실제 값은 `KLARO_INTERNAL_TOKEN=... docker compose up`으로 덮어쓰고, 아래
+# 기본값은 로컬 전용이다.
 services:
   postgres:
     image: postgres:16
@@ -36,11 +42,23 @@ services:
       OBS_REDIS_ADDR: redis:6379
       OBS_ADDR: ":8090"
       OBS_INTERNAL_ADDR: ":8443"
+      # 배포 프로파일. production으로 두면 아래 개발용 완화(평문 내부 플레인,
+      # 인증 스텁, sslmode=disable)가 전부 기동 실패로 막힌다.
+      OBS_ENV: development
       # 개발 전용 평문 내부 플레인. 프로덕션은 OBS_TLS_* 번들로 대체한다.
+      # 평문은 전송만 완화한다 — 내부 평면은 이 토큰으로 계속 인증한다(F-3).
       OBS_INTERNAL_INSECURE: "true"
-      # 개발 인증 스텁(S1과 동일 형태). 실제 인증은 후속 단계에서 교체.
+      OBS_INTERNAL_TOKEN: ${KLARO_INTERNAL_TOKEN:-dev-internal-token-change-me-0123456789}
+      # 개발 인증 스텁(S1과 동일 형태). 기본 경로는 JWT이고, 스텁은 이 플래그를
+      # 명시해야만 켜진다 — 프로덕션 프로파일에서는 금지된다.
+      #
+      # JWT로 붙어보려면 OBS_DEV_AUTH를 지우고
+      #   OBS_JWT_HS_SECRET: <32바이트 이상>
+      # 를 넣은 뒤 org_id / role / exp 클레임을 가진 HS256 토큰을 보낸다.
+      OBS_DEV_AUTH: "true"
       OBS_DEV_TOKEN: dev
       OBS_DEV_ORG_ID: "00000000-0000-0000-0000-000000000001"
+      OBS_DEV_ROLE: owner
       # Explorer 백엔드(설계 HOW-2). 비어 있으면 해당 신호는 "백엔드 없음"으로
       # 응답한다 — 빈 URL로 다이얼하지 않는다.
       OBS_VMSELECT_URL: http://vmselect:8481
@@ -70,6 +88,10 @@ services:
       context: ../collector
       dockerfile: Dockerfile
     command: ["--config", "/etc/klaro/otel-collector.yaml"]
+    environment:
+      # obsplane의 OBS_INTERNAL_TOKEN과 같은 값이어야 한다. 설정 파일에는
+      # ${env:KLARO_INTERNAL_TOKEN}로만 들어가므로 비밀은 파일에 남지 않는다.
+      KLARO_INTERNAL_TOKEN: ${KLARO_INTERNAL_TOKEN:-dev-internal-token-change-me-0123456789}
     volumes:
       - ./otel-collector.yaml:/etc/klaro/otel-collector.yaml:ro
     ports:
@@ -131,6 +153,9 @@ services:
       # CP가 그 API를 직접 받는다 — 같은 데이터를 전달만 하는 컨테이너를 하나
       # 줄인다.
       - "-notifier.url=http://obsplane:8443/internal/alerts"
+      # 내부 평면은 알림 경로에서도 인증한다(F-3). vmalert는 이 플래그로
+      # Authorization: Bearer를 붙인다 — 없으면 모든 알림이 401로 사라진다.
+      - "-notifier.bearerToken=${KLARO_INTERNAL_TOKEN:-dev-internal-token-change-me-0123456789}"
       - "-rule.resendDelay=1m"
     volumes: ["obs-rules:/etc/vmalert/rules:ro"]
     ports: ["8880:8880"]

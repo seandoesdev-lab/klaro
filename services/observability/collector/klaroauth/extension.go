@@ -30,6 +30,11 @@ var ErrUnauthorized = errors.New("klaroauth: ingest key is not authorized")
 // errNoKey is returned when the request carried no key header at all.
 var errNoKey = fmt.Errorf("%w: missing ingest key header", ErrUnauthorized)
 
+// internalRealm is what the control plane puts in WWW-Authenticate when it is
+// *this gateway* it will not authenticate, as opposed to the ingest key being
+// asked about. It must stay in step with api.internalRealm on the server side.
+const internalRealm = `realm="klaro-internal"`
+
 type cacheEntry struct {
 	g       grant
 	err     error
@@ -42,6 +47,11 @@ type authExtension struct {
 	client *http.Client
 	now    func() time.Time
 
+	// internalToken authenticates this gateway to the control plane's internal
+	// plane. Resolved once at construction so no per-request file read sits in
+	// the ingest path.
+	internalToken string
+
 	mu      sync.Mutex
 	entries map[string]cacheEntry
 }
@@ -52,12 +62,17 @@ func newExtension(cfg Config, logger *zap.Logger) (*authExtension, error) {
 	if err != nil {
 		return nil, err
 	}
+	token, err := cfg.resolveInternalToken()
+	if err != nil {
+		return nil, err
+	}
 	return &authExtension{
-		cfg:     cfg,
-		logger:  logger,
-		client:  &http.Client{Transport: transport, Timeout: cfg.Timeout},
-		now:     time.Now,
-		entries: map[string]cacheEntry{},
+		cfg:           cfg,
+		logger:        logger,
+		client:        &http.Client{Transport: transport, Timeout: cfg.Timeout},
+		now:           time.Now,
+		internalToken: token,
+		entries:       map[string]cacheEntry{},
 	}, nil
 }
 
@@ -260,6 +275,12 @@ func (a *authExtension) ask(ctx context.Context, secret string) (grant, error) {
 		return grant{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if a.internalToken != "" {
+		// The control plane accepts either a verified client certificate or
+		// this token. Sending it even when mTLS is on is harmless and keeps the
+		// gateway working across a certificate rollout.
+		req.Header.Set("Authorization", "Bearer "+a.internalToken)
+	}
 
 	resp, err := a.client.Do(req)
 	if err != nil {
@@ -270,6 +291,16 @@ func (a *authExtension) ask(ctx context.Context, secret string) (grant, error) {
 	switch resp.StatusCode {
 	case http.StatusOK:
 	case http.StatusUnauthorized, http.StatusForbidden:
+		// A 401 can mean two very different things on this endpoint: the
+		// customer's ingest key was rejected, or *this gateway* was. The
+		// control plane marks the second with an internal realm, and treating
+		// it as the first would negatively cache a perfectly good key and make
+		// a mistyped internal token look like mass revocation.
+		if strings.Contains(resp.Header.Get("WWW-Authenticate"), internalRealm) {
+			return grant{}, fmt.Errorf(
+				"klaroauth: the control plane rejected this gateway's own credential; " +
+					"check internal_token / the client certificate")
+		}
 		return grant{}, ErrUnauthorized
 	default:
 		// Anything else is the control plane failing, not the key being bad.

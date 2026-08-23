@@ -85,38 +85,54 @@ func NewRouter(d Deps) *gin.Engine {
 	// (design section 4.3) [OBS-01/APM-02].
 	r.GET("/orgs/:orgId/obs/live", d.getLive)
 
+	// Two role gates hang off the authenticated org group (design section 2.1:
+	// owner / admin / member / viewer):
+	//
+	//	read  = member+  the observability plane exposes a tenant's whole
+	//	                 telemetry history, so browsing it is not the floor
+	//	                 privilege. viewer belongs to the wider klaro RBAC and
+	//	                 has no grant here yet; giving it one is a single
+	//	                 argument change, which is why the threshold is named
+	//	                 in exactly one place.
+	//	write = admin+   issuing or revoking an ingest key, and changing an
+	//	                 alert rule or a dashboard, alter what the org collects
+	//	                 and who gets paged.
 	org := r.Group("/orgs/:orgId", tenancy.Middleware(d.Auth))
+	read := org.Group("", tenancy.RequireRole(tenancy.RoleMember))
+	write := org.Group("", tenancy.RequireRole(tenancy.RoleAdmin))
 	{
-		org.GET("/obs/tenant", d.getTenant)
+		read.GET("/obs/tenant", d.getTenant)
 
 		// Observability keys and the quota they are metered against [OBS-02].
-		org.POST("/obs/keys", d.postKey)
-		org.GET("/obs/keys", d.listKeys)
-		org.POST("/obs/keys/:keyId/rotate", d.rotateKey)
-		org.DELETE("/obs/keys/:keyId", d.deleteKey)
-		org.GET("/obs/quota", d.getQuota)
+		// Issuing a key mints an ingest credential for the whole org, so it
+		// sits behind the write gate along with rotation and revocation.
+		write.POST("/obs/keys", d.postKey)
+		read.GET("/obs/keys", d.listKeys)
+		write.POST("/obs/keys/:keyId/rotate", d.rotateKey)
+		write.DELETE("/obs/keys/:keyId", d.deleteKey)
+		read.GET("/obs/quota", d.getQuota)
 
 		// Explorer: structured reads proxied to the storage backends with the
 		// org forced in server side [OBS-03/04/05].
-		org.GET("/obs/metrics/query", d.getMetrics)
-		org.GET("/obs/traces", d.getTraces)
-		org.GET("/obs/traces/:traceId", d.getTrace)
-		org.GET("/obs/logs", d.getLogs)
+		read.GET("/obs/metrics/query", d.getMetrics)
+		read.GET("/obs/traces", d.getTraces)
+		read.GET("/obs/traces/:traceId", d.getTrace)
+		read.GET("/obs/logs", d.getLogs)
 
 		// Alert rules and the history of what they fired [OBS-06/07].
-		org.POST("/obs/alert-rules", d.postAlertRule)
-		org.GET("/obs/alert-rules", d.listAlertRules)
-		org.GET("/obs/alert-rules/:ruleId", d.getAlertRule)
-		org.PATCH("/obs/alert-rules/:ruleId", d.patchAlertRule)
-		org.DELETE("/obs/alert-rules/:ruleId", d.deleteAlertRule)
-		org.GET("/obs/alert-events", d.listAlertEvents)
+		write.POST("/obs/alert-rules", d.postAlertRule)
+		read.GET("/obs/alert-rules", d.listAlertRules)
+		read.GET("/obs/alert-rules/:ruleId", d.getAlertRule)
+		write.PATCH("/obs/alert-rules/:ruleId", d.patchAlertRule)
+		write.DELETE("/obs/alert-rules/:ruleId", d.deleteAlertRule)
+		read.GET("/obs/alert-events", d.listAlertEvents)
 
 		// Saved panel layouts [OBS-09].
-		org.POST("/obs/dashboards", d.postDashboard)
-		org.GET("/obs/dashboards", d.listDashboards)
-		org.GET("/obs/dashboards/:dashId", d.getDashboard)
-		org.PATCH("/obs/dashboards/:dashId", d.patchDashboard)
-		org.DELETE("/obs/dashboards/:dashId", d.deleteDashboard)
+		write.POST("/obs/dashboards", d.postDashboard)
+		read.GET("/obs/dashboards", d.listDashboards)
+		read.GET("/obs/dashboards/:dashId", d.getDashboard)
+		write.PATCH("/obs/dashboards/:dashId", d.patchDashboard)
+		write.DELETE("/obs/dashboards/:dashId", d.deleteDashboard)
 	}
 	return r
 }

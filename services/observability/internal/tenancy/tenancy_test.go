@@ -59,7 +59,7 @@ func errCode(t *testing.T, w *httptest.ResponseRecorder) string {
 }
 
 func TestMiddlewareResolvesOrg(t *testing.T) {
-	r := router(DevTokenAuthenticator("dev", orgA))
+	r := router(DevTokenAuthenticator("dev", orgA, RoleOwner))
 	w := do(r, "/orgs/"+orgA+"/obs/keys", "Bearer dev")
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body = %s", w.Code, w.Body)
@@ -79,7 +79,7 @@ func TestMiddlewareResolvesOrg(t *testing.T) {
 // The core cross-tenant guard: a credential for org A addressing org B is
 // refused before any query runs.
 func TestMiddlewareRejectsCrossTenantPath(t *testing.T) {
-	r := router(DevTokenAuthenticator("dev", orgA))
+	r := router(DevTokenAuthenticator("dev", orgA, RoleOwner))
 	w := do(r, "/orgs/"+orgB+"/obs/keys", "Bearer dev")
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (body %s)", w.Code, w.Body)
@@ -90,7 +90,7 @@ func TestMiddlewareRejectsCrossTenantPath(t *testing.T) {
 }
 
 func TestMiddlewareRejectsMissingAndBadCredentials(t *testing.T) {
-	r := router(DevTokenAuthenticator("dev", orgA))
+	r := router(DevTokenAuthenticator("dev", orgA, RoleOwner))
 	for _, h := range []string{"", "Bearer wrong", "dev", "Basic dev"} {
 		w := do(r, "/orgs/"+orgA+"/obs/keys", h)
 		if w.Code != http.StatusUnauthorized {
@@ -104,7 +104,7 @@ func TestMiddlewareRejectsMissingAndBadCredentials(t *testing.T) {
 }
 
 func TestMiddlewareRejectsMalformedOrgParam(t *testing.T) {
-	r := router(DevTokenAuthenticator("dev", orgA))
+	r := router(DevTokenAuthenticator("dev", orgA, RoleOwner))
 	w := do(r, "/orgs/not-a-uuid/obs/keys", "Bearer dev")
 	if w.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422 (body %s)", w.Code, w.Body)
@@ -117,7 +117,7 @@ func TestMiddlewareRejectsMalformedOrgParam(t *testing.T) {
 // A SQL-injection shaped :orgId must be rejected by the uuid guard rather than
 // reaching set_config.
 func TestMiddlewareRejectsInjectionShapedOrgParam(t *testing.T) {
-	r := router(DevTokenAuthenticator("dev", orgA))
+	r := router(DevTokenAuthenticator("dev", orgA, RoleOwner))
 	w := do(r, "/orgs/"+orgA+"%27%3B%20DROP%20TABLE%20observability_keys--/obs/keys", "Bearer dev")
 	if w.Code == http.StatusOK {
 		t.Fatalf("injection-shaped orgId was accepted: %s", w.Body)
@@ -125,7 +125,7 @@ func TestMiddlewareRejectsInjectionShapedOrgParam(t *testing.T) {
 }
 
 func TestMiddlewareAllowsRouteWithoutOrgParam(t *testing.T) {
-	r := router(DevTokenAuthenticator("dev", orgA))
+	r := router(DevTokenAuthenticator("dev", orgA, RoleOwner))
 	w := do(r, "/obs/self", "Bearer dev")
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body = %s", w.Code, w.Body)
@@ -135,7 +135,9 @@ func TestMiddlewareAllowsRouteWithoutOrgParam(t *testing.T) {
 // An authenticator returning a non-uuid org is a server bug; the request must
 // fail 500 rather than be handed to the database layer.
 func TestMiddlewareRejectsNonUUIDAuthenticatedOrg(t *testing.T) {
-	r := router(AuthenticatorFunc(func(*gin.Context) (string, bool) { return "org-one", true }))
+	r := router(AuthenticatorFunc(func(*gin.Context) (Principal, bool) {
+		return Principal{OrgID: "org-one", Role: RoleOwner}, true
+	}))
 	w := do(r, "/obs/self", "Bearer dev")
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500 (body %s)", w.Code, w.Body)
@@ -143,7 +145,7 @@ func TestMiddlewareRejectsNonUUIDAuthenticatedOrg(t *testing.T) {
 }
 
 func TestDevTokenAuthenticatorRejectsEmptyConfiguredToken(t *testing.T) {
-	a := DevTokenAuthenticator("", orgA)
+	a := DevTokenAuthenticator("", orgA, RoleOwner)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
 	if _, ok := a.Authenticate(c); ok {

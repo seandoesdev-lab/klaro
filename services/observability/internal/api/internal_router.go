@@ -35,24 +35,32 @@ type InternalDeps struct {
 	Usage     *usage.Store
 	Snapshots *snapshot.Adapter
 	Signal    redisx.Signaler
+
+	// Token is the shared secret the Collector and vmalert present as
+	// `Authorization: Bearer`. It is what keeps the internal plane
+	// authenticated when transport security is relaxed for local development -
+	// see InternalAuth.
+	Token string
 }
 
 // NewInternalRouter builds the engine served on the internal listener.
 //
-// Only the Collector and vmalert call these routes, over mTLS (design section
-// 4.4), which is why they carry no user credential. They live on a separate
+// Only the Collector and vmalert call these routes. They live on a separate
 // listener from the public API, so a request arriving on the public port can
-// never reach them.
+// never reach them, and every route under /internal is authenticated by
+// InternalAuth.
 func NewInternalRouter(d InternalDeps) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
 
+	// Liveness stays open: it is a container probe that reads nothing and
+	// returns nothing about the tenant.
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	in := r.Group("/internal")
+	in := r.Group("/internal", InternalAuth(d.Token))
 	{
 		in.POST("/authz/ingest-key", d.postAuthzIngestKey)
 		in.POST("/live-ingest", d.postLiveIngest)

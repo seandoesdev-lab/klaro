@@ -61,7 +61,7 @@ var upgrader = websocket.Upgrader{
 // distinction; it calls the same tenancy.Resolve the middleware uses, so the
 // two cannot drift apart.
 func (d Deps) getLive(c *gin.Context) {
-	orgID, outcome := tenancy.Resolve(c, d.Auth)
+	principal, outcome := tenancy.Resolve(c, d.Auth)
 	switch outcome {
 	case tenancy.OutcomeOK:
 	case tenancy.OutcomeUnauthenticated:
@@ -74,9 +74,19 @@ func (d Deps) getLive(c *gin.Context) {
 		closeWith(c, closeForbidden, "org scope mismatch")
 		return
 	default:
-		httpx.Internal(c, "authenticated org is not a valid uuid")
+		httpx.Internal(c, "authenticated principal is not usable")
 		return
 	}
+
+	// Live telemetry is a read of the org's data, so it carries the same
+	// member+ threshold as the Explorer routes. It is reported as a close code
+	// for the same reason a scope mismatch is: a browser cannot read the
+	// handshake status.
+	if !principal.Role.AtLeast(tenancy.RoleMember) {
+		closeWith(c, closeForbidden, "role must be at least member")
+		return
+	}
+	orgID := principal.OrgID
 
 	stream := c.DefaultQuery("stream", live.StreamMetric)
 	if !live.ValidStream(stream) {

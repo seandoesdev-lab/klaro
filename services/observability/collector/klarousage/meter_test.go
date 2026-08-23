@@ -52,9 +52,14 @@ func metricsBatch(instance string) pmetric.Metrics {
 	return md
 }
 
+// testInternalToken stands in for the shared secret this gateway presents to
+// the control plane's internal plane, required whenever the hop runs without a
+// client certificate.
+const testInternalToken = "internal-token-for-tests-0123456789"
+
 func newCounter(t *testing.T, endpoint string) *counter {
 	t.Helper()
-	cfg := Config{Endpoint: endpoint, TLS: TLSConfig{Insecure: true}, FlushInterval: time.Hour}
+	cfg := Config{Endpoint: endpoint, TLS: TLSConfig{Insecure: true}, InternalToken: testInternalToken, FlushInterval: time.Hour}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +165,7 @@ func TestConfigValidate(t *testing.T) {
 	ok := []Config{
 		{Endpoint: "https://cp:8443/internal/usage",
 			TLS: TLSConfig{CAFile: "ca", CertFile: "c", KeyFile: "k"}},
-		{Endpoint: "http://cp:8443/internal/usage", TLS: TLSConfig{Insecure: true}},
+		{Endpoint: "http://cp:8443/internal/usage", TLS: TLSConfig{Insecure: true}, InternalToken: testInternalToken},
 	}
 	for _, cfg := range ok {
 		if err := cfg.Validate(); err != nil {
@@ -174,8 +179,15 @@ func TestConfigValidate(t *testing.T) {
 		// metering traffic, and the org ids in it, in the clear.
 		{Endpoint: "http://cp/usage"},
 		{Endpoint: "https://cp/usage"},
-		{Endpoint: "ftp://cp/usage", TLS: TLSConfig{Insecure: true}},
-		{Endpoint: "http://cp/usage", TLS: TLSConfig{Insecure: true}, Timeout: -time.Second},
+		{Endpoint: "ftp://cp/usage", TLS: TLSConfig{Insecure: true}, InternalToken: testInternalToken},
+		{Endpoint: "http://cp/usage", TLS: TLSConfig{Insecure: true}, InternalToken: testInternalToken, Timeout: -time.Second},
+		// Plaintext transport skips encryption, not authentication: without a
+		// client certificate the token is the only thing identifying this
+		// gateway. Metering is fire-and-forget, so a silent 401 every flush
+		// would look like an org that simply stopped sending data (F-3).
+		{Endpoint: "http://cp:8443/internal/usage", TLS: TLSConfig{Insecure: true}},
+		{Endpoint: "http://cp:8443/internal/usage", TLS: TLSConfig{Insecure: true},
+			InternalToken: testInternalToken, InternalTokenFile: "/run/secrets/token"},
 	}
 	for _, cfg := range bad {
 		if err := cfg.Validate(); err == nil {
@@ -207,7 +219,7 @@ func TestRejectedReportIsNotRetried(t *testing.T) {
 }
 
 func TestEndpointMustNotBeEmptyAfterDefaults(t *testing.T) {
-	cfg := Config{Endpoint: "http://cp/usage", TLS: TLSConfig{Insecure: true}}.withDefaults()
+	cfg := Config{Endpoint: "http://cp/usage", TLS: TLSConfig{Insecure: true}, InternalToken: testInternalToken}.withDefaults()
 	if cfg.FlushInterval != DefaultFlushInterval || cfg.MaxHosts != DefaultMaxHosts {
 		t.Errorf("defaults = %+v", cfg)
 	}
