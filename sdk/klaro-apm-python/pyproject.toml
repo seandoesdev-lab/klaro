@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "klaro-apm"
+version = "0.1.0"
+description = "klaro 상시 관측 플랫폼(Observability) 연동을 위한 OpenTelemetry thin wrapper SDK"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "klaro" }]
+
+dependencies = [
+    "opentelemetry-api>=1.27,<2",
+    "opentelemetry-sdk>=1.27,<2",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.27,<2",
+]
+
+[project.optional-dependencies]
+fastapi = [
+    "opentelemetry-instrumentation-fastapi>=0.48b0",
+]
+test = [
+    "pytest>=8",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["klaro_apm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
