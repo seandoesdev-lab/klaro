@@ -14,9 +14,10 @@
 #      dashboard connected to an empty backend is indistinguishable from a
 #      broken one.
 #
-# Everything is idempotent: re-running re-seeds the org, mints a fresh token and
-# issues an additional key. Keys are never reused, because obsplane stores only
-# sha256(secret) and cannot show an old one again.
+# Re-running is safe. The org row is upserted, a fresh token is minted, and a
+# fresh ingest key is issued while the keys a previous run left active are
+# revoked. Keys are never reused: obsplane stores only sha256(secret), so one it
+# already holds can never be shown again.
 #
 # Usage:  ./seed-dev.sh [--org <uuid>] [--plan free|pro|enterprise] [--no-key]
 set -euo pipefail
@@ -24,6 +25,7 @@ set -euo pipefail
 ORG="00000000-0000-0000-0000-000000000001"
 PLAN="pro"
 ISSUE_KEY=1
+KEY_PREFIX="local-dev"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -45,8 +47,8 @@ COMPOSE=(docker compose -f "$DEPLOY_DIR/docker-compose.yml")
 log() { echo "seed-dev: $*" >&2; }
 
 # --- 1. the org row ---------------------------------------------------------
-# plan_code carries the retention window and the quota baseline, so a seeded
-# org without one would read every telemetry query back through the Free plan's
+# plan_code carries the retention window and the quota baseline, so a seeded org
+# without one would read every telemetry query back through the Free plan's
 # 1-day clamp.
 log "seeding org $ORG (plan $PLAN)"
 "${COMPOSE[@]}" exec -T postgres psql -v ON_ERROR_STOP=1 -q -U klaro -d klaro_obs -c \
@@ -61,10 +63,43 @@ TOKEN="$(node "$SCRIPT_DIR/dev-token.mjs" --org "$ORG" --role admin)"
 # --- 3. an ingest key -------------------------------------------------------
 KEY=""
 if [ "$ISSUE_KEY" = "1" ]; then
-  log "issuing an ingest key"
+  # Every run issues a NEW key under a unique name, and revokes the ones a
+  # previous run left active.
+  #
+  # A fixed name cannot work here, and neither can rotation. observability_keys
+  # is UNIQUE (org_id, name) and the row survives revocation for the audit trail,
+  # so a name is consumed permanently the first time it is used - re-creating it
+  # is a 409. Rotation would reuse the name, but only while the key is still
+  # active: obsplane refuses to rotate a revoked key and says to issue a new one.
+  # So: a unique name per run, and the previous ones revoked, so the org is not
+  # left holding a pile of active credentials whose secrets nobody has any more.
+  #
+  # The suffix carries $$ as well as the clock: two runs inside the same second
+  # would otherwise collide on the name and the second one would be a 409.
+  RUN_LABEL="$KEY_PREFIX $(date -u +%Y%m%dT%H%M%SZ)-$$"
+
+  # Captured into a variable rather than piped into `while read`: a pipeline
+  # would run the loop in a subshell, and `read` returns false on the last line
+  # when it has no trailing newline - which silently skipped exactly one key.
+  STALE_IDS="$(curl -fsS "$OBSPLANE_URL/orgs/$ORG/obs/keys" -H "Authorization: Bearer $TOKEN" |
+    KEY_PREFIX="$KEY_PREFIX" node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+      const pre = process.env.KEY_PREFIX;
+      const stale = (JSON.parse(s).data ?? [])
+        .filter(k => k.name.startsWith(pre) && k.status !== "revoked");
+      process.stdout.write(stale.map(k => k.id + "\n").join(""));})')"
+  for stale_id in $STALE_IDS; do
+    log "revoking a previous $KEY_PREFIX key ($stale_id)"
+    # DELETE is idempotent and immediate. The old secret is unrecoverable, so an
+    # active key nobody holds is only a credential left open for no one.
+    curl -fsS -X DELETE "$OBSPLANE_URL/orgs/$ORG/obs/keys/$stale_id" \
+      -H "Authorization: Bearer $TOKEN" >/dev/null
+  done
+
+  log "issuing an ingest key ($RUN_LABEL)"
   KEY_JSON="$(curl -fsS -X POST "$OBSPLANE_URL/orgs/$ORG/obs/keys" \
     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-    -d '{"name":"local-dev"}')"
+    -d "{\"name\":\"$RUN_LABEL\"}")"
+
   # The secret is in this response and nowhere else, ever again.
   KEY="$(printf '%s' "$KEY_JSON" | node -e \
     'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).secret??""))')"
@@ -85,7 +120,7 @@ NEXT_PUBLIC_OBS_MOCK=0
 ENVEOF
 log "wrote $ENV_FILE"
 
-# stdout is machine-readable so a wrapper (scripts/e2e-fullstack.sh) can eval it.
+# stdout is machine-readable so a wrapper (scripts/e2e-fullstack.sh) can source it.
 echo "KLARO_ORG_ID=$ORG"
 echo "KLARO_OBS_TOKEN=$TOKEN"
 [ -n "$KEY" ] && echo "KLARO_OBS_KEY=$KEY"
