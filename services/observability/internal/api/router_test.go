@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/klaro/observability/internal/dashboards"
 	"github.com/klaro/observability/internal/explorer"
 	"github.com/klaro/observability/internal/live"
 	"github.com/klaro/observability/internal/platform/httpx"
@@ -34,6 +35,9 @@ func deps() Deps {
 		// reports an unconfigured backend, which is what the routing tests want.
 		Explorer: explorer.New(explorer.Config{}, tenants.NewStaticMapper(map[string]uint32{orgA: 1}), nil),
 		Live:     live.NewHub(redisx.NewMemory()),
+		// A nil *db.DB is enough: every dashboard route under test must be
+		// stopped by the tenancy guard or by validation, never reach the store.
+		Dashboards: dashboards.NewStore(nil),
 	}
 }
 

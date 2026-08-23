@@ -57,7 +57,7 @@ func TestPostAlertRuleRefusesNonMetricSignal(t *testing.T) {
 // A rule may not restate the org matcher the server injects.
 func TestPostAlertRuleRefusesReservedFilterLabel(t *testing.T) {
 	body := `{"name":"sneaky","comparator":"gt","threshold":1,
-	          "query_spec":{"metric":"cpu","filters":[{"Label":"klaro_org_id","Value":"other"}]}}`
+	          "query_spec":{"metric":"cpu","filters":[{"label":"klaro_org_id","value":"other"}]}}`
 	w := do(NewRouter(deps()), http.MethodPost, "/orgs/"+orgA+"/obs/alert-rules", "Bearer dev", body)
 	if w.Code != http.StatusUnprocessableEntity {
 		t.Errorf("status = %d, want 422 (body %s)", w.Code, w.Body)

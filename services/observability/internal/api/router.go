@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/klaro/observability/internal/alerting"
+	"github.com/klaro/observability/internal/dashboards"
 	"github.com/klaro/observability/internal/explorer"
 	"github.com/klaro/observability/internal/ingestkey"
 	"github.com/klaro/observability/internal/live"
@@ -29,17 +30,18 @@ import (
 
 // Deps are the collaborators the router hands to its handlers.
 type Deps struct {
-	DB       *db.DB
-	Signal   redisx.Signaler
-	Tenants  tenants.Mapper
-	Auth     tenancy.Authenticator
-	Keys     *ingestkey.Store
-	Authz    *ingestkey.Authorizer
-	Audit    audit.Recorder
-	Live     *live.Hub
-	Explorer *explorer.Client
-	Rules    *alerting.Store
-	RuleSync *alerting.Syncer
+	DB         *db.DB
+	Signal     redisx.Signaler
+	Tenants    tenants.Mapper
+	Auth       tenancy.Authenticator
+	Keys       *ingestkey.Store
+	Authz      *ingestkey.Authorizer
+	Audit      audit.Recorder
+	Live       *live.Hub
+	Explorer   *explorer.Client
+	Rules      *alerting.Store
+	RuleSync   *alerting.Syncer
+	Dashboards *dashboards.Store
 
 	// RotationGrace is how long a rotated key keeps working alongside its
 	// replacement (design HOW-4).
@@ -108,6 +110,13 @@ func NewRouter(d Deps) *gin.Engine {
 		org.PATCH("/obs/alert-rules/:ruleId", d.patchAlertRule)
 		org.DELETE("/obs/alert-rules/:ruleId", d.deleteAlertRule)
 		org.GET("/obs/alert-events", d.listAlertEvents)
+
+		// Saved panel layouts [OBS-09].
+		org.POST("/obs/dashboards", d.postDashboard)
+		org.GET("/obs/dashboards", d.listDashboards)
+		org.GET("/obs/dashboards/:dashId", d.getDashboard)
+		org.PATCH("/obs/dashboards/:dashId", d.patchDashboard)
+		org.DELETE("/obs/dashboards/:dashId", d.deleteDashboard)
 	}
 	return r
 }

@@ -1,10 +1,10 @@
 // Command obsplane is the always-on observability control plane.
 //
-// Build-order steps 1-9 (design section 6): platform plumbing, migrations,
-// tenancy with a durable backend-tenant mapping, observability keys, the live
-// path from Collector replica to WebSocket, the Explorer read proxy, alerting
-// through vmalert, plan retention with metric downsampling, and usage metering.
-// Dashboards and the report snapshot adapter are later steps.
+// The whole of design section 6: platform plumbing, migrations, tenancy with a
+// durable backend-tenant mapping, observability keys, the live path from
+// Collector replica to WebSocket, the Explorer read proxy, alerting through
+// vmalert, plan retention with metric downsampling, usage metering, saved
+// dashboards, and the report snapshot adapter.
 //
 // Two listeners, on purpose:
 //
@@ -33,6 +33,7 @@ import (
 
 	"github.com/klaro/observability/internal/alerting"
 	"github.com/klaro/observability/internal/api"
+	"github.com/klaro/observability/internal/dashboards"
 	"github.com/klaro/observability/internal/explorer"
 	"github.com/klaro/observability/internal/ingestkey"
 	"github.com/klaro/observability/internal/live"
@@ -43,6 +44,7 @@ import (
 	"github.com/klaro/observability/internal/platform/mtls"
 	"github.com/klaro/observability/internal/platform/redisx"
 	"github.com/klaro/observability/internal/retention"
+	"github.com/klaro/observability/internal/snapshot"
 	"github.com/klaro/observability/internal/tenancy"
 	"github.com/klaro/observability/internal/tenants"
 	"github.com/klaro/observability/internal/usage"
@@ -133,6 +135,11 @@ func run() error {
 		},
 	})
 	usageStore := usage.New(database)
+	dashboardStore := dashboards.NewStore(database)
+	// The snapshot adapter reads through the Explorer, so the report path
+	// inherits the org enforcement, retention clamp and rollup fallback instead
+	// of getting a second read path to forget them in.
+	snapshots := snapshot.New(explore)
 
 	public := &http.Server{
 		Addr: cfg.Addr,
@@ -150,15 +157,17 @@ func run() error {
 			Explorer:         explore,
 			Rules:            rules,
 			RuleSync:         ruleSync,
+			Dashboards:       dashboardStore,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	internal, err := internalServer(cfg, api.InternalDeps{
-		Authz:  authorizer,
-		Signal: signaler,
-		Alerts: alerting.NewReceiver(rules, signaler),
-		Usage:  usageStore,
+		Authz:     authorizer,
+		Signal:    signaler,
+		Alerts:    alerting.NewReceiver(rules, signaler),
+		Usage:     usageStore,
+		Snapshots: snapshots,
 	})
 	if err != nil {
 		return err

@@ -90,3 +90,12 @@ func TestUsageRouteValidates(t *testing.T) {
 		t.Fatalf("status = %d (body %s)", w.Code, w.Body)
 	}
 }
+
+// postInternalWith posts to the internal plane with caller-supplied deps.
+func postInternalWith(d InternalDeps, path, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	NewInternalRouter(d).ServeHTTP(w, req)
+	return w
+}

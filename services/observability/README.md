@@ -1,4 +1,4 @@
-# klaro 상시 관측 플랫폼 (S3) — 수집·라이브·조회·알림·과금
+# klaro 상시 관측 플랫폼 (S3) — 트랙 A 구현 완료
 
 **최종 목표: Datadog 유사 상시 관측 제품.** 배포 적합성 리포트(S4)는 이 플랫폼의 데이터를
 "특정 구간 스냅샷"으로 소비하는 하나의 소비자일 뿐이다.
@@ -8,7 +8,7 @@
 
 ## 이 저장소 조각의 범위
 
-설계 §6 빌드순서 **1~9단계**가 구현되어 있다.
+설계 §6 빌드순서 **1~12단계 전체**가 구현되어 있다.
 
 | 단계 | 내용 | 상태 |
 |------|------|------|
@@ -21,7 +21,9 @@
 | 7 | alerting(룰 CRUD · vmalert 룰그룹 렌더/sync · webhook→이벤트 · Notifier) (OBS-06/07) | ✅ |
 | 8 | retention + 다운샘플링(플랜별 보존 집행 · 5m/1h 롤업 · explorer 폴백) (OBS-08) | ✅ |
 | 9 | usage 발행(호스트수 + 수집GB → klaro.usage.emitted) (BILL-03) | ✅ |
-| 10~12 | dashboards · snapshot 어댑터 · 통합 E2E | 미착수 |
+| 10 | dashboards(spec JSONB 패널 CRUD, 패널은 explorer 쿼리 참조) (OBS-09) | ✅ |
+| 11 | snapshot 어댑터(리포트용 구간 조회를 explorer에 위임, 소유·저장 없음) (OBS-10) | ✅ |
+| 12 | 통합 기동 + 전 기능 관통 E2E(16건) | ✅ |
 
 `services/load-test/`의 project 단위 APM 경로(`apm_agents`, `apm_spans`, `apm_logs`)는
 **리포트 스냅샷 경로로 존치**한다. 대체가 아니라 공존이다(설계 §0·§4.6).
@@ -78,6 +80,8 @@ internal/alerting/       룰 CRUD · vmalert 룰그룹 렌더/sync · webhook �
 internal/retention/      플랜별 보존 집행 잡(OBS-08)
 internal/usage/          계량 수집 + klaro.usage.emitted 발행(BILL-03)
 internal/plans/          org→플랜 보존/쿼터 조회(한 곳에서만 읽는다)
+internal/dashboards/     저장된 패널 레이아웃 — spec JSONB CRUD + 쓰기 시 쿼리 검증(OBS-09)
+internal/snapshot/       리포트(S4)용 구간 조회 어댑터 — explorer에 위임, 저장 없음(OBS-10)
 internal/platform/
   config/                환경변수 로딩 + 검증
   db/                    pgx 풀 · WithOrg(RLS 세션) · 마이그레이션 러너(advisory lock)
@@ -275,6 +279,67 @@ klaro.usage.emitted  {org_id, meter, quantity(증분), period, computation}
 - `observability_hosts`를 쓰는 주체가 생긴 것도 이 단계다. 그전까지 활성 호스트 카운트는
   빈 테이블을 읽어 모든 org가 유휴로 보였다.
 
+## 대시보드 (OBS-09)
+
+| 메서드 | 경로 |
+|---|---|
+| POST · GET | `/orgs/:orgId/obs/dashboards` |
+| GET · PATCH · DELETE | `/orgs/:orgId/obs/dashboards/:dashId` |
+
+대시보드는 **JSONB 문서 하나**다(HOW-3). `dashboard_panels` 테이블은 없다 — 패널은 자신을
+담은 대시보드 밖에서 정체성이 없고, 렌더링은 klaro 프런트가 Explorer API로 한다.
+Grafana 임베드가 아니므로 패널이 외부에서 주소 지정될 필요가 없다.
+
+```json
+{"name":"checkout","spec":{
+  "range_sec":3600, "refresh_sec":30,
+  "panels":[{"id":"latency","title":"p95","type":"timeseries",
+             "layout":{"x":0,"y":0,"w":6,"h":4},
+             "query":{"signal":"metrics","metric":"http_server_duration",
+                      "agg":"p95","step_sec":60,
+                      "filters":[{"label":"service_name","value":"checkout"}]}}]}}
+```
+
+**패널 쿼리는 쓰기 시점에 Explorer와 같은 규칙으로 검증한다.** 이게 이 패키지의 핵심이다 —
+없으면 대시보드가 "Explorer가 거부할 쿼리를 저장하는 수단"이 되고(예약 라벨을 적은 패널
+포함), 거부는 나중에 그 대시보드를 연 사람에게만 드러난다.
+
+- `signal`은 `metrics`/`traces`/`logs`, `type`은 `timeseries`/`stat`/`table`/`logs`/`traces`.
+- 다른 신호의 필드는 무시하지 않고 **거부**한다. 무시된 필드는 뭔가 한 것처럼 보인다.
+- 예약 라벨(`klaro_org_id` 등)은 422. 패널이 org 매처를 다시 쓸 수 있으면 다른 org로도
+  쓸 수 있고, 그게 **저장**된다.
+- 패널 수·그리드·step·limit·refresh 모두 상한이 있다. 대시보드는 매 페이지 로드마다
+  읽히는 행에 담긴 호출자 제공 JSON이다.
+- lifecycle은 `audit_logs`에 `obs.dashboard.*`로 기록된다(패널 문서 자체는 복사하지 않는다 —
+  감사에 필요한 건 누가 언제 무엇을 바꿨는지다).
+
+## 리포트 스냅샷 (OBS-10)
+
+`POST /internal/snapshot` (내부 플레인) — 배포 리포트(S4)가 "14:02~14:09에 이 서비스는
+어땠는가"를 묻는 경로다(설계 §4.6).
+
+```json
+{"org_id":"…","from":"…","to":"…",
+ "metrics":[{"key":"latency","metric":"http_server_duration","agg":"p95","step_sec":15}],
+ "traces":{"service":"checkout","min_duration_ms":3000,"limit":20}}
+```
+
+어댑터는 **아무것도 소유하지 않고 아무것도 저장하지 않는다.** 조회를 Explorer에 위임할
+뿐이다. 이 결정에는 두 방향의 이유가 있다:
+
+- Explorer를 거치므로 org 테넌트 강제·플랜 보존 클램프·롤업 폴백이 여기에도 그대로
+  적용된다. 두 번째 조회 경로는 그것들을 잊을 두 번째 장소다.
+- 저장하지 않으므로 리포트가 텔레메트리의 소유자가 될 수 없다. 상시 수집·저장·보존은
+  리포트가 성공하든 실패하든 아예 실행되지 않든 계속된다 — 리포트는 구간의 소비자이고,
+  데이터가 존재하는 이유가 아니다. 결합하면 리포트 삭제가 관측 데이터를 함께 가져가거나,
+  실패한 리포트가 플랜을 넘긴 데이터를 살려두게 된다.
+- 창이 플랜 보존을 넘으면 응답에 `partial: true`와 `notes`가 실린다. 짧은 선을 그리고
+  말하지 않으면 읽는 사람은 나머지가 조용했다고 이해한다.
+- 메트릭 쿼리 하나가 실패해도 스냅샷은 실패하지 않는다. 차트 다섯 중 넷이 있는 리포트는
+  쓸모가 있고, 에러 페이지인 리포트는 없다. 무엇이 없는지는 `notes`에 적는다.
+- Go 패키지가 아니라 HTTP로도 노출하는 이유: S4는 다른 모듈의 다른 서비스라서, import할
+  수 없는 패키지는 종이 위의 설계다.
+
 ## 환경변수
 
 | 변수 | 기본값 | 비고 |
@@ -360,6 +425,7 @@ org 스코프 테이블 전부 `FORCE` 확인 · `app.current_org`가 트랜잭�
 # 스택 기동 + org 시드 + 키 발급은 아래 "로컬 기동" 절 참고
 MSYS_NO_PATHCONV=1 docker run --rm --network deploy_default -v "$(pwd -W):/src" -w //src \
   -e E2E_OBSPLANE_URL=http://obsplane:8090 \
+  -e E2E_INTERNAL_URL=http://obsplane:8443 \
   -e E2E_OTLP_URL=http://otel-collector:4318 \
   -e E2E_VMSELECT_URL=http://vmselect:8481 \
   -e E2E_MAILHOG_URL=http://mailhog:8025 \
@@ -376,7 +442,10 @@ Explorer로 되읽힘 · 생성된 쿼리에 org 매처가 붙어 있음 · 워�
 새지 않음** · 룰 생성→vmalert 발동→alert_event 기록(값 포함, 라우팅 라벨 미노출, 재전송
 dedup으로 열린 이벤트 1건) · 알림이 MailHog 도착 · 롤업 시리즈 생성과 Explorer 폴백
 (resolution이 raw가 아니고 org 매처 유지) · 보존 창 안에서는 raw 유지 · 게이트웨이 계량이
-쿼터에 반영되고 klaro.usage.emitted가 발행됨.
+쿼터에 반영되고 klaro.usage.emitted가 발행됨 · 대시보드 생성→조회→목록→PATCH→삭제에서
+패널 문서가 그대로 왕복하고 예약 라벨 패널은 422 · 스냅샷이 리포트 구간을 돌려주고
+(org 매처 유지, 내부 라벨 미노출, 플랜 내 창은 partial 아님) 잘못된 요청은 백엔드를
+건드리기 전에 422. 총 16건.
 
 마지막 항목은 제품 표면에서는 보이지 않는 불변식이라 vmselect를 직접 본다(Explorer는
 호출자 자신의 테넌트만 조회할 수 있고, 그게 바로 이 유출을 아무도 눈치채지 못하는
@@ -424,6 +493,24 @@ curl -s -H "X-Scope-OrgID: $ORG" localhost:3200/api/traces/<trace-id>
 라이브 소켓은 `ws://localhost:8090/orgs/$ORG/obs/live?stream=metric`이고, 그 밑의
 Redis 채널은 `klaro:obs:live:<org>:metric`이다:
 `docker compose exec redis redis-cli psubscribe 'klaro:obs:live:*'`.
+
+알림은 vmalert UI(`localhost:8880`)에서 룰 상태를, MailHog UI(`localhost:8025`)에서
+발송된 알림을 볼 수 있다. 대시보드와 스냅샷은:
+
+```bash
+# 대시보드 저장 → 목록
+curl -s -X POST localhost:8090/orgs/$ORG/obs/dashboards \
+  -H 'Authorization: Bearer dev' -H 'Content-Type: application/json' \
+  -d '{"name":"checkout","spec":{"panels":[]}}'
+curl -s localhost:8090/orgs/$ORG/obs/dashboards -H 'Authorization: Bearer dev'
+
+# 리포트 스냅샷 (내부 플레인 — 개발 compose는 평문 8443)
+FROM=$(date -u -d '-15 min' +%Y-%m-%dT%H:%M:%SZ)
+TO=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+curl -s -X POST localhost:8443/internal/snapshot -H 'Content-Type: application/json' \
+  -d "{\"org_id\":\"$ORG\",\"from\":\"$FROM\",\"to\":\"$TO\",
+       \"metrics\":[{\"key\":\"latency\",\"metric\":\"klaro_smoke_total\",\"agg\":\"avg\"}]}"
+```
 
 ## Collector 배포판을 왜 직접 만드나
 
@@ -479,4 +566,5 @@ Tempo/Loki는 `otlp`/`otlphttp` 익스포터가 컨텍스트를 유지하므로 
 - **보존의 물리 삭제에는 빈틈이 있다**: VM은 시간범위 삭제가 없어 완전 만료 org만
   지우고, Tempo는 per-tenant delete API가 없다. 계약을 지키는 층은 explorer 클램프다.
 - **다운샘플링은 메트릭 전용**이다(트레이스/로그에는 표준 개념이 없다).
-- **대시보드(OBS-09)와 리포트 스냅샷 어댑터(OBS-10)가 없다**(설계 §6 10~11단계).
+- **대시보드는 저장·검증만 한다**. 렌더링은 프런트가 Explorer API로 하며, 이 저장소에
+  차트 코드는 없다(HOW-3: Grafana 임베드가 아니다).

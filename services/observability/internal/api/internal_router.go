@@ -16,6 +16,7 @@ import (
 	"github.com/klaro/observability/internal/live"
 	"github.com/klaro/observability/internal/platform/httpx"
 	"github.com/klaro/observability/internal/platform/redisx"
+	"github.com/klaro/observability/internal/snapshot"
 	"github.com/klaro/observability/internal/usage"
 )
 
@@ -29,10 +30,11 @@ const maxInternalBody = 1 << 20 // 1 MiB
 
 // InternalDeps are the collaborators of the internal plane.
 type InternalDeps struct {
-	Authz  *ingestkey.Authorizer
-	Alerts *alerting.Receiver
-	Usage  *usage.Store
-	Signal redisx.Signaler
+	Authz     *ingestkey.Authorizer
+	Alerts    *alerting.Receiver
+	Usage     *usage.Store
+	Snapshots *snapshot.Adapter
+	Signal    redisx.Signaler
 }
 
 // NewInternalRouter builds the engine served on the internal listener.
@@ -62,6 +64,9 @@ func NewInternalRouter(d InternalDeps) *gin.Engine {
 
 		// Volume and host metering from the gateway [BILL-03].
 		in.POST("/usage", d.postUsage)
+
+		// A report service asking for one window of telemetry [OBS-10].
+		in.POST("/snapshot", d.postSnapshot)
 	}
 	return r
 }

@@ -37,10 +37,14 @@ var Aggregations = []string{"rate", "avg", "sum", "count", "p50", "p95", "p99"}
 const maxLabelValue = 512
 
 // Matcher is one label condition.
+//
+// The json tags matter: matchers are not only parsed from query parameters, they
+// are also stored inside an alert rule spec and a dashboard panel, where a
+// capitalised key would leak Go naming into a customer-facing document.
 type Matcher struct {
-	Label  string
-	Negate bool
-	Value  string
+	Label  string `json:"label"`
+	Negate bool   `json:"negate,omitempty"`
+	Value  string `json:"value"`
 }
 
 // ValidLabelName reports whether s is a label a caller may name.
