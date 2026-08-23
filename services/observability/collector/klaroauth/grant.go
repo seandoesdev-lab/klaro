@@ -18,6 +18,18 @@ const (
 	MetadataQuotaOverage = "klaro-quota-overage"
 )
 
+// tenantMetadataKeys is every key above: the ones only the control plane may
+// set. withTenant clears each of them, in any casing, before writing the
+// resolved identity, so nothing a client sent can be mistaken for it later.
+// Keep this list in step with the constants - a key added there but not here is
+// a forgeable one.
+var tenantMetadataKeys = []string{
+	MetadataScopeOrgID,
+	MetadataVMAccountID,
+	MetadataOrgID,
+	MetadataQuotaOverage,
+}
+
 // quota mirrors the subset of the control plane quota snapshot the gateway uses.
 type quota struct {
 	ActiveHosts    int     `json:"active_hosts"`

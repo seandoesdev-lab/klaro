@@ -5,8 +5,12 @@
 #                                 --> obsplane /internal/live-ingest (라이브 복제)
 #
 # 테넌트는 SDK가 보낸 값이 아니라 klaroauth가 컨트롤 플레인에서 받아온 값이다.
-# klarotenant가 클라이언트가 보낸 vm_account_id를 덮어쓰므로 라벨 위조로 다른
-# org에 쓰는 경로가 없다.
+# klaroauth가 클라이언트가 보낸 테넌트 헤더를 대소문자 무시로 지우고 klarotenant가
+# vm_account_id 라벨을 덮어쓰므로, 헤더든 라벨든 위조로 다른 org에 쓰는 경로가 없다.
+#
+# 이 파일은 개발(compose) 기준선이고 내부 홉이 평문이다. 프로덕션은 이 파일에
+# otel-collector.prod.yaml을 겹쳐서 SDK↔Collector mTLS를 강제한다:
+#   klaro-otelcol --config otel-collector.yaml --config otel-collector.prod.yaml
 extensions:
   health_check:
     endpoint: 0.0.0.0:13133
@@ -20,11 +24,9 @@ extensions:
     negative_cache_ttl: 5s
     timeout: 3s
     tls:
-      # 개발 compose 전용. 프로덕션은 아래 블록으로 교체한다(CLAUDE.md: 내부 mTLS 필수).
-      #   ca_file: /etc/klaro/tls/ca.pem
-      #   cert_file: /etc/klaro/tls/collector.pem
-      #   key_file: /etc/klaro/tls/collector-key.pem
-      #   server_name: obsplane
+      # 개발 compose 전용. 프로덕션은 otel-collector.prod.yaml이 이 값을 덮어쓴다
+      # (CLAUDE.md: 내부 mTLS 필수). insecure를 명시적으로 켜야만 평문이 되므로,
+      # 번들이 없다고 조용히 강등되는 경로는 없다(klaroauth Validate).
       insecure: true
 
   # ② Tempo·Loki 테넌시: 컨텍스트의 org를 X-Scope-OrgID 헤더로 옮긴다.
@@ -43,12 +45,11 @@ receivers:
         include_metadata: true
         auth:
           authenticator: klaroauth
-        # 프로덕션 mTLS(SDK↔Collector):
-        #   tls:
-        #     ca_file: /etc/klaro/tls/ca.pem
-        #     cert_file: /etc/klaro/tls/collector.pem
-        #     key_file: /etc/klaro/tls/collector-key.pem
-        #     client_ca_file: /etc/klaro/tls/ca.pem
+        # tls 블록이 없다 = 평문. 개발 전용이다. 프로덕션은 이 파일을 고치지 않고
+        # otel-collector.prod.yaml을 --config로 덧붙여 mTLS를 켠다(그 파일의
+        # "강제 지점" 주석이 어느 키가 강제 스위치인지 적어둔다). 여기 주석으로
+        # 적어두지 않는 이유: 한 번도 적용된 적 없는 설정이 옆에 남으면 켜져
+        # 있다고 착각하기 쉽다.
       http:
         endpoint: 0.0.0.0:4318
         include_metadata: true
@@ -75,7 +76,8 @@ processors:
     endpoint: http://obsplane:8443/internal/usage
     flush_interval: 15s
     tls:
-      # 개발 compose 전용. 프로덕션은 klaroauth와 동일한 mTLS 번들로 교체한다.
+      # 개발 compose 전용. 프로덕션은 otel-collector.prod.yaml이 klaroauth와
+      # 동일한 mTLS 번들로 덮어쓴다.
       insecure: true
 
   batch:
