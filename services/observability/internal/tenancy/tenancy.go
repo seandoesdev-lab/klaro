@@ -60,36 +60,72 @@ func DevTokenAuthenticator(token, orgID string) Authenticator {
 	})
 }
 
+// Outcome is why Resolve accepted or rejected a request.
+//
+// Resolve reports rather than writes, because the two transports disagree about
+// how a rejection looks: REST answers with the shared JSON envelope, while a
+// WebSocket has to say it in a close code (design section 4.3). Sharing the
+// decision and splitting only the reporting keeps them from drifting apart -
+// which would be the kind of drift where one transport quietly stops checking.
+type Outcome int
+
+// Resolve outcomes.
+const (
+	// OutcomeOK means the caller is authenticated and, if the route carries an
+	// :orgId, addressing its own org.
+	OutcomeOK Outcome = iota
+	// OutcomeUnauthenticated: no credential, or one that did not resolve.
+	OutcomeUnauthenticated
+	// OutcomeForbidden: authenticated for one org, addressing another.
+	OutcomeForbidden
+	// OutcomeInvalidOrgParam: the :orgId in the path is not a uuid.
+	OutcomeInvalidOrgParam
+	// OutcomeServerError: the authenticator produced a non-uuid org, which is a
+	// server bug and must never reach set_config.
+	OutcomeServerError
+)
+
+// Resolve authenticates the caller and matches the :orgId path parameter
+// without writing anything to the response.
+//
+// On OutcomeOK the org is attached to the context, exactly as Middleware would.
+func Resolve(c *gin.Context, auth Authenticator) (string, Outcome) {
+	orgID, ok := auth.Authenticate(c)
+	if !ok {
+		return "", OutcomeUnauthenticated
+	}
+	if !db.ValidOrgID(orgID) {
+		return "", OutcomeServerError
+	}
+	if param := c.Param("orgId"); param != "" {
+		if !db.ValidOrgID(param) {
+			return "", OutcomeInvalidOrgParam
+		}
+		if !strings.EqualFold(param, orgID) {
+			return "", OutcomeForbidden
+		}
+	}
+	Set(c, orgID)
+	return orgID, OutcomeOK
+}
+
 // Middleware authenticates the caller and, when the route carries an :orgId
 // path parameter, requires it to match.
 func Middleware(auth Authenticator) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		orgID, ok := auth.Authenticate(c)
-		if !ok {
+		switch _, outcome := Resolve(c, auth); outcome {
+		case OutcomeOK:
+			c.Next()
+		case OutcomeUnauthenticated:
 			httpx.Unauthenticated(c, "missing or invalid credentials")
-			return
-		}
-		if !db.ValidOrgID(orgID) {
-			// An authenticator that yields a non-uuid org is a server bug, not a
-			// client error - never let it reach set_config.
-			httpx.Internal(c, "authenticated org is not a valid uuid")
-			return
-		}
-
-		if param := c.Param("orgId"); param != "" {
-			if !db.ValidOrgID(param) {
-				httpx.Validation(c, "orgId must be a uuid", gin.H{"orgId": param})
-				return
-			}
+		case OutcomeInvalidOrgParam:
+			httpx.Validation(c, "orgId must be a uuid", gin.H{"orgId": c.Param("orgId")})
+		case OutcomeForbidden:
 			// Cross-tenant attempt: authenticated for one org, addressing another.
-			if !strings.EqualFold(param, orgID) {
-				httpx.Forbidden(c, "org scope mismatch")
-				return
-			}
+			httpx.Forbidden(c, "org scope mismatch")
+		default:
+			httpx.Internal(c, "authenticated org is not a valid uuid")
 		}
-
-		Set(c, orgID)
-		c.Next()
 	}
 }
 

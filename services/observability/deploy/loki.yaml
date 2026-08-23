@@ -33,7 +33,25 @@ limits_config:
   # 개발 로컬 디스크 상한. 플랜별 보존은 CP retentionjob이 별도로 집행한다.
   retention_period: 24h
 
+  # klaro.org_id를 스트림 라벨로 색인한다.
+  #
+  # OTLP 수집에서 Loki는 service.name 등 일부만 라벨로 승격하고 나머지 리소스
+  # 속성은 structured metadata로 넣는다. structured metadata는 셀렉터로 매칭할
+  # 수 없어서, explorer가 강제 주입하는 {klaro_org_id="…"} 매처가 아무것도
+  # 고르지 못한다 — 조회 결과가 항상 비어 보인다.
+  #
+  # 카디널리티 비용은 없다(org당 값 하나). 격리의 1차 방어선은 여전히
+  # X-Scope-OrgID(auth_enabled)이고, 이 라벨은 2차 방어선이다.
+  otlp_config:
+    resource_attributes:
+      ignore_defaults: false
+      attributes_config:
+        - action: index_label
+          attributes:
+            - klaro.org_id
+
 compactor:
   working_directory: /loki/compactor
   retention_enabled: true
   delete_request_store: filesystem
+

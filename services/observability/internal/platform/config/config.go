@@ -53,6 +53,18 @@ type Config struct {
 	// KeyTouchWindow rate-limits observability_keys.last_used_at writes.
 	KeyTouchWindow time.Duration
 
+	// Telemetry backends the Explorer proxies to. An empty URL disables that
+	// signal rather than dialling nothing: a deployment without Tempo should
+	// say "no traces backend", not time out.
+	VMSelectURL string
+	TempoURL    string
+	LokiURL     string
+	// ExplorerTimeout bounds one backend query.
+	ExplorerTimeout time.Duration
+	// ExplorerMaxRows caps rows per query, so one request cannot pull a
+	// retention window into memory.
+	ExplorerMaxRows int
+
 	// AutoMigrate applies migrations/*.sql on boot (dev convenience).
 	AutoMigrate bool
 
@@ -98,6 +110,9 @@ func Load(getenv func(string) string) (Config, error) {
 		InternalAddr:       str(getenv, "OBS_INTERNAL_ADDR", ":8443"),
 		AutoMigrate:        boolean(getenv, "OBS_AUTO_MIGRATE", true),
 		InternalInsecure:   boolean(getenv, "OBS_INTERNAL_INSECURE", false),
+		VMSelectURL:        getenv("OBS_VMSELECT_URL"),
+		TempoURL:           getenv("OBS_TEMPO_URL"),
+		LokiURL:            getenv("OBS_LOKI_URL"),
 		DBConnectTimeout:   10 * time.Second,
 		TLS: TLSPaths{
 			CAFile:   getenv("OBS_TLS_CA_FILE"),
@@ -129,6 +144,7 @@ func Load(getenv func(string) string) (Config, error) {
 		{"OBS_KEY_ROTATION_GRACE_SEC", 86400, &c.RotationGrace},
 		{"OBS_AUTHZ_CACHE_TTL_SEC", 30, &c.AuthzCacheTTL},
 		{"OBS_KEY_TOUCH_WINDOW_SEC", 60, &c.KeyTouchWindow},
+		{"OBS_EXPLORER_TIMEOUT_SEC", 30, &c.ExplorerTimeout},
 	} {
 		secs, err := integer(getenv, d.key, d.def)
 		switch {
@@ -139,6 +155,16 @@ func Load(getenv func(string) string) (Config, error) {
 		default:
 			*d.target = time.Duration(secs) * time.Second
 		}
+	}
+
+	rows, err := integer(getenv, "OBS_EXPLORER_MAX_ROWS", 1000)
+	switch {
+	case err != nil:
+		errs = append(errs, err.Error())
+	case rows < 1:
+		errs = append(errs, "OBS_EXPLORER_MAX_ROWS must be >= 1")
+	default:
+		c.ExplorerMaxRows = rows
 	}
 
 	if !strings.HasPrefix(c.DatabaseURL, "postgres://") && !strings.HasPrefix(c.DatabaseURL, "postgresql://") {

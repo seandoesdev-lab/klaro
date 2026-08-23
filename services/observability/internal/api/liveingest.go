@@ -2,8 +2,10 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
+	"github.com/klaro/observability/internal/live"
 	"github.com/klaro/observability/internal/platform/db"
 )
 
@@ -11,20 +13,6 @@ import (
 // on every batch it forwards. It is the control-plane-issued org, never
 // anything the SDK chose.
 const otlpOrgAttribute = "klaro.org_id"
-
-// otlpMetricStream is the live stream name OTLP metric replicas land on.
-const otlpMetricStream = "metric"
-
-// otlpMetrics is the slice of the OTLP/JSON metrics envelope this endpoint
-// needs.
-//
-// Hand-rolled rather than pulled from the OTel proto packages: the control
-// plane only has to find the org on each resource and pass the group through
-// untouched, and taking the collector module as a dependency here would drag
-// the whole pdata tree into a service that never inspects a datapoint.
-type otlpMetrics struct {
-	ResourceMetrics []json.RawMessage `json:"resourceMetrics"`
-}
 
 // otlpResourceHeader reads just the resource attributes of one group.
 type otlpResourceHeader struct {
@@ -38,32 +26,82 @@ type otlpResourceHeader struct {
 	} `json:"resource"`
 }
 
-// liveBatch is one publishable unit: a group of OTLP resource metrics together
-// with the org it belongs to.
-type liveBatch struct {
-	OrgID  string          `json:"org_id"`
-	Stream string          `json:"stream"`
-	Group  json.RawMessage `json:"resourceMetrics"`
+// orgFrame is one publishable unit: a live frame together with the org whose
+// channel it belongs on.
+type orgFrame struct {
+	OrgID string
+	Frame live.Frame
 }
 
-// splitOTLPByOrg turns an OTLP/JSON metrics payload into one batch per resource
-// group, keyed by the org stamped on that resource.
+// parseLiveFrames turns a live-ingest body into the frames to publish.
 //
-// One collector export can carry several orgs, because the gateway batches
-// across tenants. Publishing the whole payload to one org would leak every
-// other tenant in it, so the split happens here rather than at the WebSocket.
-func splitOTLPByOrg(body []byte) ([]liveBatch, error) {
-	var env otlpMetrics
-	if err := json.Unmarshal(body, &env); err != nil {
-		return nil, fmt.Errorf("decode otlp metrics: %w", err)
+// Two shapes are accepted. The Collector exports OTLP/JSON, because that is
+// what an otlphttp exporter emits and adding a bespoke exporter to the gateway
+// to reshape it would be a component to maintain for no benefit. The flat
+// frame shape stays supported because it is what tests and curl send, and what
+// a future non-OTLP producer would use.
+//
+// Translation happens here rather than at the WebSocket: a hundred dashboards
+// watching one org must not mean a hundred OTLP parses per Collector flush.
+func parseLiveFrames(body []byte, nowMillis int64) ([]orgFrame, error) {
+	if len(body) == 0 {
+		return nil, errors.New("body must be a JSON object")
 	}
-	out := make([]liveBatch, 0, len(env.ResourceMetrics))
-	for _, group := range env.ResourceMetrics {
+	var probe struct {
+		OrgID           string            `json:"org_id"`
+		Stream          string            `json:"stream"`
+		Points          []live.Point      `json:"points"`
+		TS              int64             `json:"ts"`
+		ResourceMetrics []json.RawMessage `json:"resourceMetrics"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return nil, fmt.Errorf("body must be a JSON object: %v", err)
+	}
+
+	if len(probe.ResourceMetrics) > 0 {
+		return otlpFrames(probe.ResourceMetrics, nowMillis)
+	}
+
+	if !db.ValidOrgID(probe.OrgID) {
+		return nil, errors.New("org_id must be a uuid")
+	}
+	if !live.ValidStream(probe.Stream) {
+		return nil, fmt.Errorf("stream must be one of %v, got %q", live.Streams, probe.Stream)
+	}
+	ts := probe.TS
+	if ts == 0 {
+		ts = nowMillis
+	}
+	points := probe.Points
+	if points == nil {
+		points = []live.Point{}
+	}
+	return []orgFrame{{
+		OrgID: probe.OrgID,
+		Frame: live.Frame{TS: ts, Stream: probe.Stream, Points: points},
+	}}, nil
+}
+
+// otlpFrames splits an OTLP metrics export into one frame per resource group.
+//
+// One export can carry several orgs, because the gateway batches across
+// tenants. Publishing the whole payload to one org would hand it every other
+// tenant in the batch, so the split happens before anything is published.
+func otlpFrames(groups []json.RawMessage, nowMillis int64) ([]orgFrame, error) {
+	out := make([]orgFrame, 0, len(groups))
+	for _, group := range groups {
 		orgID, err := orgOfResource(group)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, liveBatch{OrgID: orgID, Stream: otlpMetricStream, Group: group})
+		frame, err := live.FlattenOTLP(group, live.StreamMetric, nowMillis)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, orgFrame{OrgID: orgID, Frame: frame})
+	}
+	if len(out) == 0 {
+		return nil, errors.New("otlp payload carries no resource metrics")
 	}
 	return out, nil
 }

@@ -34,15 +34,6 @@ extensions:
         key: X-Scope-OrgID
         from_context: x-scope-orgid
 
-  # ③ VictoriaMetrics 테넌시: 같은 컨텍스트 값을 AccountID 헤더로 옮긴다.
-  #    v1.150의 -enableMultitenancyViaHeaders(기본 on) 경로다. 라벨 방식과 달리
-  #    테넌트가 데이터에 섞이지 않아 카디널리티에 영향을 주지 않는다.
-  headers_setter/vm:
-    headers:
-      - action: upsert
-        key: AccountID
-        from_context: klaro-vm-account-id
-
 receivers:
   otlp:
     protocols:
@@ -89,15 +80,25 @@ processors:
     metadata_cardinality_limit: 1000
 
 exporters:
-  # 메트릭: vminsert 멀티테넌트 쓰기. 테넌트는 headers_setter/vm이 붙이는
-  # AccountID 헤더로 전달되므로 org마다 익스포터를 복제할 필요가 없다.
+  # 메트릭: vminsert 멀티테넌트 쓰기.
+  #
+  # 테넌트는 klarotenant가 리소스 속성으로 붙인 vm_account_id 라벨로 전달한다
+  # (resource_to_telemetry_conversion이 라벨로 변환하고, vminsert가 라우팅에
+  # 쓴 뒤 시리즈에서 제거한다).
+  #
+  # 헤더(headers_setter)로 하지 않는 이유: prometheusremotewrite 익스포터는
+  # export를 다른 고루틴에서 수행하고 그 과정에서 요청의 client 메타데이터가
+  # 사라진다. 그러면 AccountID 헤더가 빠지고 vminsert는 기본 계정(0 — 전 org
+  # 공용 버킷)에 쓴다. 에러도 남지 않는 조용한 크로스테넌트 혼합이다.
+  # 실측: 헤더 방식에서 target_info만 org 테넌트에 들어가고 실제 시리즈는
+  # 계정 0으로 갔다. 라벨은 데이터에 실려 모든 비동기 홉을 살아서 통과한다.
+  # (Tempo/Loki는 otlp/otlphttp 익스포터가 컨텍스트를 유지하므로 헤더로 충분하다.)
   prometheus_remote_write/vm:
     endpoint: http://vminsert:8480/insert/multitenant/prometheus/api/v1/write
-    auth:
-      authenticator: headers_setter/vm
+    resource_to_telemetry_conversion:
+      enabled: true
     remote_write_queue:
       enabled: true
-      num_consumers: 4
     tls:
       insecure: true
 
@@ -125,7 +126,7 @@ exporters:
       enabled: false
 
 service:
-  extensions: [health_check, klaroauth, headers_setter, headers_setter/vm]
+  extensions: [health_check, klaroauth, headers_setter]
   telemetry:
     logs:
       level: info

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/klaro/observability/internal/ingestkey"
+	"github.com/klaro/observability/internal/live"
 	"github.com/klaro/observability/internal/platform/redisx"
 )
 
@@ -88,7 +89,7 @@ func TestLiveIngestPublishesOnTheOrgChannel(t *testing.T) {
 	}
 	defer cancel()
 
-	body := `{"org_id":"` + orgA + `","stream":"metric","ts":1756000000,` +
+	body := `{"org_id":"` + orgA + `","stream":"metric","ts":1756000000000,` +
 		`"points":[{"labels":{"service":"api"},"value":1.5}]}`
 	req := httptest.NewRequest(http.MethodPost, "/internal/live-ingest", strings.NewReader(body))
 	w := httptest.NewRecorder()
@@ -101,12 +102,21 @@ func TestLiveIngestPublishesOnTheOrgChannel(t *testing.T) {
 
 	select {
 	case got := <-ch:
-		var decoded map[string]any
-		if err := json.Unmarshal(got, &decoded); err != nil {
-			t.Fatalf("published payload is not JSON: %v", err)
+		var frame live.Frame
+		if err := json.Unmarshal(got, &frame); err != nil {
+			t.Fatalf("published payload is not a live frame: %v", err)
 		}
-		if decoded["org_id"] != orgA {
-			t.Errorf("published org_id = %v", decoded["org_id"])
+		if frame.Stream != live.StreamMetric || frame.TS != 1756000000000 {
+			t.Errorf("frame envelope = %+v", frame)
+		}
+		if len(frame.Points) != 1 || frame.Points[0].Value != 1.5 {
+			t.Errorf("frame points = %+v", frame.Points)
+		}
+		// The org is the channel, not a field: a subscriber can only be on one
+		// org's channel, so repeating it in the payload would be a second place
+		// for the two to disagree.
+		if strings.Contains(string(got), "org_id") {
+			t.Errorf("frame carries an org_id field: %s", got)
 		}
 	default:
 		t.Fatal("nothing was published on the org channel")
@@ -181,9 +191,10 @@ func TestLiveIngestSplitsOTLPByOrg(t *testing.T) {
 	body := `{"resourceMetrics":[
 	  {"resource":{"attributes":[{"key":"klaro.org_id","value":{"stringValue":"` + orgA + `"}},
 	                             {"key":"service.name","value":{"stringValue":"checkout"}}]},
-	   "scopeMetrics":[{"metrics":[{"name":"http.server.duration"}]}]},
-	  {"resource":{"attributes":[{"key":"klaro.org_id","value":{"stringValue":"` + orgB + `"}}]},
-	   "scopeMetrics":[{"metrics":[{"name":"db.client.duration"}]}]}]}`
+	   "scopeMetrics":[{"metrics":[{"name":"http.server.duration","gauge":{"dataPoints":[{"asDouble":12}]}}]}]},
+	  {"resource":{"attributes":[{"key":"klaro.org_id","value":{"stringValue":"` + orgB + `"}},
+	                             {"key":"service.name","value":{"stringValue":"billing"}}]},
+	   "scopeMetrics":[{"metrics":[{"name":"db.client.duration","gauge":{"dataPoints":[{"asDouble":34}]}}]}]}]}`
 
 	req := httptest.NewRequest(http.MethodPost, "/internal/live-ingest", strings.NewReader(body))
 	w := httptest.NewRecorder()
@@ -192,26 +203,27 @@ func TestLiveIngestSplitsOTLPByOrg(t *testing.T) {
 		t.Fatalf("status = %d, want 202 (body %s)", w.Code, w.Body)
 	}
 
-	for org, ch := range map[string]<-chan []byte{orgA: chA, orgB: chB} {
+	want := map[string]struct {
+		ch     <-chan []byte
+		metric string
+		other  string
+	}{
+		orgA: {chA, "http.server.duration", "billing"},
+		orgB: {chB, "db.client.duration", "checkout"},
+	}
+	for org, exp := range want {
 		select {
-		case got := <-ch:
-			var decoded struct {
-				OrgID string `json:"org_id"`
-				Group string `json:"-"`
+		case got := <-exp.ch:
+			var frame live.Frame
+			if err := json.Unmarshal(got, &frame); err != nil {
+				t.Fatalf("%s: payload is not a live frame: %v", org, err)
 			}
-			if err := json.Unmarshal(got, &decoded); err != nil {
-				t.Fatalf("%s: payload is not JSON: %v", org, err)
+			if len(frame.Points) != 1 || frame.Points[0].Labels["__name__"] != exp.metric {
+				t.Errorf("%s received %+v, want the %s metric", org, frame.Points, exp.metric)
 			}
-			if decoded.OrgID != org {
-				t.Errorf("%s channel carried org %s", org, decoded.OrgID)
-			}
-			// The neighbour must not be inside this payload.
-			other := orgA
-			if org == orgA {
-				other = orgB
-			}
-			if strings.Contains(string(got), other) {
-				t.Errorf("%s payload mentions %s: %s", org, other, got)
+			// The neighbour must not be anywhere inside this payload.
+			if strings.Contains(string(got), exp.other) {
+				t.Errorf("%s payload mentions %s: %s", org, exp.other, got)
 			}
 		default:
 			t.Errorf("%s received nothing", org)

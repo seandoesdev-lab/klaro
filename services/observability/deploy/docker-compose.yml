@@ -41,10 +41,18 @@ services:
       # 개발 인증 스텁(S1과 동일 형태). 실제 인증은 후속 단계에서 교체.
       OBS_DEV_TOKEN: dev
       OBS_DEV_ORG_ID: "00000000-0000-0000-0000-000000000001"
+      # Explorer 백엔드(설계 HOW-2). 비어 있으면 해당 신호는 "백엔드 없음"으로
+      # 응답한다 — 빈 URL로 다이얼하지 않는다.
+      OBS_VMSELECT_URL: http://vmselect:8481
+      OBS_TEMPO_URL: http://tempo:3200
+      OBS_LOKI_URL: http://loki:3100
     ports: ["8090:8090", "8443:8443"]
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_started }
+      vmselect: { condition: service_started }
+      tempo: { condition: service_started }
+      loki: { condition: service_started }
 
   # --- 수집 게이트웨이 -----------------------------------------------------
   otel-collector:
@@ -85,7 +93,11 @@ services:
 
   vmselect:
     image: victoriametrics/vmselect:v1.150.0-cluster
-    command: ["-storageNode=vmstorage:8401"]
+    command:
+      - "-storageNode=vmstorage:8401"
+      # 기본 30초 지연은 스크레이프 파이프라인을 위한 값이다. 우리 경로는 push라
+      # 방금 들어온 샘플이 30초간 조회에 안 보이면 Explorer가 고장난 것처럼 보인다.
+      - "-search.latencyOffset=1s"
     ports: ["8481:8481"]
     depends_on: [vmstorage]
 

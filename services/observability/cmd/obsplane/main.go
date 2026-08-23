@@ -1,9 +1,9 @@
 // Command obsplane is the always-on observability control plane.
 //
-// Build-order steps 1-4 (design section 6): platform plumbing, migrations,
+// Build-order steps 1-6 (design section 6): platform plumbing, migrations,
 // tenancy with a durable backend-tenant mapping, observability keys with the
-// Collector authz endpoint, and the live-ingest hook the Collector replicates
-// metrics into. Explorer, alerting and the WebSocket fan-out are later steps.
+// Collector authz endpoint, the live path from Collector replica to WebSocket,
+// and the Explorer read proxy. Alerting, retention and usage are later steps.
 //
 // Two listeners, on purpose:
 //
@@ -31,7 +31,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/klaro/observability/internal/api"
+	"github.com/klaro/observability/internal/explorer"
 	"github.com/klaro/observability/internal/ingestkey"
+	"github.com/klaro/observability/internal/live"
 	"github.com/klaro/observability/internal/platform/audit"
 	"github.com/klaro/observability/internal/platform/config"
 	"github.com/klaro/observability/internal/platform/db"
@@ -89,6 +91,18 @@ func run() error {
 		CacheTTL:         cfg.AuthzCacheTTL,
 	})
 
+	// The hub multiplexes one Redis subscription per org+stream out to every
+	// socket watching it, so a dashboard open on twenty screens is one
+	// subscription rather than twenty.
+	hub := live.NewHub(signaler)
+	explore := explorer.New(explorer.Config{
+		VMSelectURL: cfg.VMSelectURL,
+		TempoURL:    cfg.TempoURL,
+		LokiURL:     cfg.LokiURL,
+		Timeout:     cfg.ExplorerTimeout,
+		MaxLimit:    cfg.ExplorerMaxRows,
+	}, tenantMapper)
+
 	public := &http.Server{
 		Addr: cfg.Addr,
 		Handler: api.NewRouter(api.Deps{
@@ -101,6 +115,8 @@ func run() error {
 			Audit:            audit.NewPG(database),
 			RotationGrace:    cfg.RotationGrace,
 			ActiveHostWindow: cfg.ActiveHostWindow,
+			Live:             hub,
+			Explorer:         explore,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

@@ -8,6 +8,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/klaro/observability/internal/explorer"
+	"github.com/klaro/observability/internal/live"
 	"github.com/klaro/observability/internal/platform/httpx"
 	"github.com/klaro/observability/internal/platform/redisx"
 	"github.com/klaro/observability/internal/tenancy"
@@ -28,6 +30,10 @@ func deps() Deps {
 		Signal:  redisx.NewMemory(),
 		Tenants: tenants.NewStaticMapper(map[string]uint32{orgA: 1}),
 		Auth:    tenancy.DevTokenAuthenticator("dev", orgA),
+		// No backend URLs: the explorer handlers are reachable but every query
+		// reports an unconfigured backend, which is what the routing tests want.
+		Explorer: explorer.New(explorer.Config{}, tenants.NewStaticMapper(map[string]uint32{orgA: 1})),
+		Live:     live.NewHub(redisx.NewMemory()),
 	}
 }
 

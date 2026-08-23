@@ -2,17 +2,17 @@ package api
 
 import (
 	"compress/gzip"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/klaro/observability/internal/ingestkey"
-	"github.com/klaro/observability/internal/platform/db"
+	"github.com/klaro/observability/internal/live"
 	"github.com/klaro/observability/internal/platform/httpx"
 	"github.com/klaro/observability/internal/platform/redisx"
 )
@@ -90,23 +90,6 @@ func (d InternalDeps) postAuthzIngestKey(c *gin.Context) {
 	c.JSON(http.StatusOK, grant)
 }
 
-// validStream keeps the stream name inside a character set that cannot escape
-// its Redis channel. The channel is klaro:obs:live:<org>:<stream>, so a ':' in
-// the stream would let a caller address a channel it was not granted.
-func validStream(s string) bool {
-	if s == "" || len(s) > 32 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		ok := (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-'
-		if !ok {
-			return false
-		}
-	}
-	return true
-}
-
 // postLiveIngest publishes a replicated metric batch onto the org's live
 // channel [OBS-01/APM-02, design HOW-7].
 //
@@ -140,23 +123,14 @@ func (d InternalDeps) postLiveIngest(c *gin.Context) {
 		return
 	}
 
-	batches, err := parseLiveBody(body)
+	frames, err := parseLiveFrames(body, time.Now().UnixMilli())
 	if err != nil {
 		httpx.Validation(c, err.Error(), nil)
 		return
 	}
-	for _, b := range batches {
-		// Republish the group as received. Reshaping it here would put a second
-		// schema between the Collector and the WebSocket clients for no gain.
-		payload := body
-		if b.Group != nil {
-			if payload, err = json.Marshal(b); err != nil {
-				httpx.Internal(c, "encode live batch")
-				return
-			}
-		}
-		if err := d.Signal.PublishLive(c.Request.Context(), b.OrgID, b.Stream, payload); err != nil {
-			httpx.Internal(c, "publish live batch")
+	for _, f := range frames {
+		if err := live.Publish(c.Request.Context(), d.Signal, f.OrgID, f.Frame); err != nil {
+			httpx.Internal(c, "publish live frame")
 			return
 		}
 	}
@@ -172,35 +146,3 @@ func (d InternalDeps) postLiveIngest(c *gin.Context) {
 // component to maintain for no benefit. The flat {org_id, stream, points} form
 // stays supported because it is what tests and curl send, and what a future
 // non-OTLP producer would use.
-func parseLiveBody(body []byte) ([]liveBatch, error) {
-	if len(body) == 0 {
-		return nil, errors.New("body must be a JSON object")
-	}
-	var probe struct {
-		OrgID           string          `json:"org_id"`
-		Stream          string          `json:"stream"`
-		ResourceMetrics json.RawMessage `json:"resourceMetrics"`
-	}
-	if err := json.Unmarshal(body, &probe); err != nil {
-		return nil, fmt.Errorf("body must be a JSON object: %v", err)
-	}
-
-	if len(probe.ResourceMetrics) > 0 {
-		batches, err := splitOTLPByOrg(body)
-		if err != nil {
-			return nil, err
-		}
-		if len(batches) == 0 {
-			return nil, errors.New("otlp payload carries no resource metrics")
-		}
-		return batches, nil
-	}
-
-	if !db.ValidOrgID(probe.OrgID) {
-		return nil, errors.New("org_id must be a uuid")
-	}
-	if !validStream(probe.Stream) {
-		return nil, fmt.Errorf("stream must be 1-32 chars of [a-z0-9_-], got %q", probe.Stream)
-	}
-	return []liveBatch{{OrgID: probe.OrgID, Stream: probe.Stream}}, nil
-}

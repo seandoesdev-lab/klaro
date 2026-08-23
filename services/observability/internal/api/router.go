@@ -15,7 +15,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/klaro/observability/internal/explorer"
 	"github.com/klaro/observability/internal/ingestkey"
+	"github.com/klaro/observability/internal/live"
 	"github.com/klaro/observability/internal/platform/audit"
 	"github.com/klaro/observability/internal/platform/db"
 	"github.com/klaro/observability/internal/platform/httpx"
@@ -26,13 +28,15 @@ import (
 
 // Deps are the collaborators the router hands to its handlers.
 type Deps struct {
-	DB      *db.DB
-	Signal  redisx.Signaler
-	Tenants tenants.Mapper
-	Auth    tenancy.Authenticator
-	Keys    *ingestkey.Store
-	Authz   *ingestkey.Authorizer
-	Audit   audit.Recorder
+	DB       *db.DB
+	Signal   redisx.Signaler
+	Tenants  tenants.Mapper
+	Auth     tenancy.Authenticator
+	Keys     *ingestkey.Store
+	Authz    *ingestkey.Authorizer
+	Audit    audit.Recorder
+	Live     *live.Hub
+	Explorer *explorer.Client
 
 	// RotationGrace is how long a rotated key keeps working alongside its
 	// replacement (design HOW-4).
@@ -69,6 +73,13 @@ func NewRouter(d Deps) *gin.Engine {
 
 	// Every org-scoped route lives under this group so the tenancy guard cannot
 	// be skipped by forgetting a middleware on an individual route.
+	// Live streaming sits outside the org group on purpose: it authorises
+	// with the same tenancy.Resolve the middleware uses, but reports a
+	// scope mismatch as a WebSocket close code rather than an HTTP status,
+	// which is the only form a browser client can actually read
+	// (design section 4.3) [OBS-01/APM-02].
+	r.GET("/orgs/:orgId/obs/live", d.getLive)
+
 	org := r.Group("/orgs/:orgId", tenancy.Middleware(d.Auth))
 	{
 		org.GET("/obs/tenant", d.getTenant)
@@ -79,6 +90,13 @@ func NewRouter(d Deps) *gin.Engine {
 		org.POST("/obs/keys/:keyId/rotate", d.rotateKey)
 		org.DELETE("/obs/keys/:keyId", d.deleteKey)
 		org.GET("/obs/quota", d.getQuota)
+
+		// Explorer: structured reads proxied to the storage backends with the
+		// org forced in server side [OBS-03/04/05].
+		org.GET("/obs/metrics/query", d.getMetrics)
+		org.GET("/obs/traces", d.getTraces)
+		org.GET("/obs/traces/:traceId", d.getTrace)
+		org.GET("/obs/logs", d.getLogs)
 	}
 	return r
 }
