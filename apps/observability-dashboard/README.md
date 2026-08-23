@@ -10,16 +10,36 @@ REST/WebSocket 표면을 소비해 메트릭·트레이스·로그를 탐색하�
 
 ## 실행
 
+### mock 모드 (백엔드 없이)
+
 ```bash
 npm install
-cp .env.example .env.local     # 값 조정
+cp .env.example .env.local     # NEXT_PUBLIC_OBS_MOCK=1 그대로
 npm run dev                    # http://localhost:3100
 ```
 
-기본값은 `NEXT_PUBLIC_OBS_MOCK=1`(mock 모드)이다. obsplane 없이도 모든 화면이
-실제 응답 shape 그대로 동작한다. 실제 백엔드에 붙이려면 `.env.local`에서
-`NEXT_PUBLIC_OBS_MOCK=0`으로 두고 `NEXT_PUBLIC_OBS_API_BASE` · `NEXT_PUBLIC_OBS_ORG_ID` ·
-`NEXT_PUBLIC_OBS_TOKEN`을 채운다.
+obsplane 없이도 모든 화면이 실제 응답 shape 그대로 동작한다. 기본값이 mock인 이유는
+백엔드가 항상 옆에서 돌고 있지는 않고, 빈 화면이 명백히 가짜인 데이터보다 나쁜
+기본값이기 때문이다.
+
+### 실데이터 (로컬 풀스택)
+
+```bash
+# 저장소 루트에서 — compose 기동 + 시드 + 주입 + REST/WS 확인 + next build
+./scripts/e2e-fullstack.sh
+
+# .env.local은 위 스크립트가 써준다(토큰·org·MOCK=0). 그 다음:
+cd apps/observability-dashboard && npm run dev     # http://localhost:3100/live
+```
+
+시드만 다시 하려면 `services/observability/deploy/scripts/seed-dev.sh`다 — org 행을
+넣고, HS256 JWT를 발급하고, 수집 키를 발급하고, 이 앱의 `.env.local`을 다시 쓴다.
+자세한 절차와 포트 표는 `services/observability/README.md`의 "로컬 풀스택 실행"에 있다.
+
+세 변수만 알면 충분하다: `NEXT_PUBLIC_OBS_API_BASE`(기본 `http://localhost:8090`) ·
+`NEXT_PUBLIC_OBS_ORG_ID` · `NEXT_PUBLIC_OBS_TOKEN`. 토큰의 `org_id` 클레임과
+`NEXT_PUBLIC_OBS_ORG_ID`가 **같아야** 한다 — 다르면 REST는 403, 라이브 소켓은 4403이고
+브라우저에서는 둘 다 서버 장애처럼 보인다.
 
 ## 화면
 
@@ -49,20 +69,41 @@ npm run dev                    # http://localhost:3100
 
 ## 인증
 
-API 클라이언트(`src/lib/api/client.ts`)가 모든 요청에 `Authorization: Bearer <token>`을
-붙인다. obsplane은 현재 개발용 단일 토큰(`tenancy.DevTokenAuthenticator`)을 받고 JWT로
-하드닝 중이지만, 클라이언트 입장에서는 동일하다.
+API 클라이언트(`src/lib/api/client.ts`)가 모든 REST 요청에
+`Authorization: Bearer <token>`을 붙인다. obsplane은 서명된 JWT를 검증하고
+(`tenancy.JWTAuthenticator`: `org_id` · `role` · `exp` 필수), 개발도 프로덕션과 같은
+경로다 — 다른 건 시크릿의 출처뿐이다. 로컬 토큰은
+`services/observability/deploy/scripts/dev-token.mjs`가 찍는다.
 
-**알려진 간극 — WebSocket 자격 증명**: 브라우저 WebSocket API는 핸드셰이크에
-`Authorization` 헤더를 붙일 수 없다. obsplane의 `getLive`는 헤더만 읽으므로, mock을 끈
-상태에서 라이브 스트림을 붙이려면 서버가 다음 중 하나를 받아들여야 한다:
+### WebSocket 자격 증명 — 서브프로토콜로 확정
 
-- `?access_token=<토큰>` 쿼리 파라미터 (`NEXT_PUBLIC_OBS_WS_AUTH_MODE=query`, 기본값)
-- `Sec-WebSocket-Protocol: klaro-bearer,<토큰>` 서브프로토콜
-  (`...=subprotocol`; 서버가 선택한 서브프로토콜을 **되돌려줘야** 브라우저가 연결을 유지한다)
+브라우저 WebSocket API는 핸드셰이크에 `Authorization` 헤더를 붙일 수 없다. 결정은
+**서브프로토콜**이다:
 
-셋째 선택지는 인증을 종단하는 리버스 프록시다. 어느 쪽으로 정할지는 백엔드 하드닝
-작업의 결정 사항이라 클라이언트는 세 모드를 모두 설정으로 열어두었다.
+```
+Sec-WebSocket-Protocol: klaro-bearer, <token>
+```
+
+`liveProtocols()`가 이 두 값을 보내고, obsplane의 `getLive`가
+`tenancy.SubprotocolToken`으로 읽고, 응답에 `klaro-bearer`를 **에코**한다(RFC 6455 §4.2.2).
+에코가 없으면 브라우저는 인증에 성공한 연결을 스스로 끊으므로, 에코는 장식이 아니라
+연결 조건이다. 토큰은 에코되지 않는다.
+
+**쿼리 파라미터 모드는 없앴다.** URL에 실린 토큰은 경로상 모든 프록시의 액세스 로그,
+브라우저 히스토리, 페이지가 외부로 링크할 때의 Referer에 남는다. 이 토큰 하나가 org
+하나이므로 짧은 코드 경로와 바꿀 만한 거래가 아니다. `NEXT_PUBLIC_OBS_WS_AUTH_MODE`에
+`query`를 넣으면 콘솔 경고와 함께 `subprotocol`로 처리된다 —
+조용히 무시하면 설정은 틀린 채로 화면은 동작해서 아무도 알아채지 못한다.
+
+REST 쪽은 헤더 그대로다. 서브프로토콜 확장은 라이브 라우트 **하나에만** 열려 있다
+(`tenancy.AllowWSSubprotocolCredential`); 다른 라우트는 헤더만 읽는다.
+
+### 교차 출처
+
+대시보드(:3100)와 obsplane(:8090)은 다른 오리진이다. obsplane은 개발 프로파일에서
+`OBS_DEV_CORS_ORIGINS`로 이 오리진을 허용하고(compose 기본값에 포함), 프리플라이트를
+인증 앞에서 답한다. 프로덕션 프로파일은 이 변수를 거부한다 — 그때는 동일 오리진 서빙이나
+게이트웨이가 정책을 갖는다.
 
 ## 디자인
 
@@ -76,7 +117,20 @@ API 클라이언트(`src/lib/api/client.ts`)가 모든 요청에 `Authorization:
 ```bash
 npm run typecheck   # tsc --noEmit
 npm run build       # next build
+npm audit           # 0 vulnerabilities 유지
 ```
+
+백엔드까지 관통하는 검증은 저장소 루트의 `./scripts/e2e-fullstack.sh`다 — compose 기동,
+시드, 합성 메트릭 주입, 라이브 WS 프레임 수신, Explorer 조회, `next build`를 단계별
+PASS/FAIL로 찍는다.
+
+### 의존성 어드바이저리
+
+`next`는 `15.5.23`으로 올려 크리티컬 1건 + 하이 2건을 닫았다(semver-minor). 남은
+`postcss` · `sharp` 하이 2건은 npm이 제안하는 유일한 수정이 `next@16`(major)이었는데,
+프레임워크 메이저 업그레이드는 이 작업의 범위가 아니다. 둘 다 **자기 major 안에서**
+패치되어 있으므로 `package.json`의 `overrides`로 올렸다(`postcss@^8.5.23`,
+`sharp@^0.35.0`) — `npm audit`는 0건이고 `next build`는 그대로 통과한다.
 
 헤드리스 스모크는 `next start` 후 시스템 Chrome + puppeteer-core로 돌렸다: 6개 라우트의
 앱 셸·본문 텍스트, 차트 SVG 렌더, 워터폴 스팬, 테마 토글, 빈 상태, 알림 룰 생성·토글,

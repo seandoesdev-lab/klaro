@@ -160,6 +160,7 @@ func run() error {
 			Keys:             keys,
 			Authz:            authorizer,
 			Audit:            audit.NewPG(database),
+			DevCORSOrigins:   cfg.DevCORSOrigins,
 			RotationGrace:    cfg.RotationGrace,
 			ActiveHostWindow: cfg.ActiveHostWindow,
 			Live:             hub,
