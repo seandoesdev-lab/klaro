@@ -121,3 +121,36 @@ drop-newest(신규 span 거부)라서 §5가 요구하는 drop-oldest와 반대�
 경우에만 최소 구현을 추가한다" 조항에 따라 `src/dropOldestBatchSpanProcessor.ts`
 (`DropOldestBatchSpanProcessor`)를 최소 구현으로 추가했다. 실제 네트워크 전송/실패 판정은 여전히
 주입된 `OTLPTraceExporter`에 전량 위임한다(재시도 로직 자체 구현 없음).
+
+## 11. Java 구현 매핑
+
+| 계약 항목 | Java 구현 위치 |
+|---|---|
+| 설정 로딩 | `src/main/java/io/klaro/apm/KlaroConfig.java` (`KlaroConfig.resolve`) |
+| 인증 헤더 | `KlaroConfig.otlpHeaders()` → `OtlpGrpcSpanExporterBuilder.addHeader()`(`KlaroApm.buildExporter`) |
+| host_ident 정규화 | `src/main/java/io/klaro/apm/HostIdent.java` (`HostIdent.resolve`) |
+| mTLS 옵션 | `KlaroApm.buildExporter()`(`setTrustedCertificates`/`setClientTls`) |
+| 초기화/샘플링/배치 | `src/main/java/io/klaro/apm/KlaroApm.java` (`init`, `buildTracerProvider`) |
+| Spring Boot 헬퍼 | `src/main/java/io/klaro/apm/spring/KlaroApmEnvironmentPostProcessor.java` — `spring-boot`는 compileOnly(선택 의존성), 실제 자동계측은 공식 `io.opentelemetry.instrumentation:opentelemetry-spring-boot-starter`와 조합해 "starter" 형태로 제공 |
+
+**§5 drop-oldest 관련 Java 특이사항**: OTel Java 표준 `BatchSpanProcessor`도 Node와 동일하게
+drop-newest다(`Worker.addSpan()`이 고정 크기 큐에 `offer()`만 시도하고 실패하면 새 span을 버림 —
+OTel Java 1.65.0 소스로 확인). §5의 "없는 경우에만 최소 구현을 추가한다" 조항에 따라
+`src/main/java/io/klaro/apm/DropOldestBatchSpanProcessor.java`를 추가했다. Node의 이벤트 루프
+기반 구현과 달리 Java는 실제 데몬 스레드로 배치를 처리한다(비블로킹은 `onEnd()`가 동기화된 큐에
+push만 하고 반환하는 것으로 보장). 실제 네트워크 전송/실패 판정은 여전히 주입된 `SpanExporter`
+(OTel `OtlpGrpcSpanExporter`)에 전량 위임한다.
+
+**Java 특이사항(그 외)**:
+- **엔드포인트 스킴**: OTel Java의 `OtlpGrpcSpanExporterBuilder.setEndpoint()`는 `http://`/
+  `https://` 스킴이 붙은 URL을 요구해, 언어 공통 `host:port` 형식에 스킴을 자동으로 붙이는
+  `KlaroApm.normalizeEndpoint()`가 필요했다(§1의 `endpoint` 값 자체는 계약대로 스킴 없이 유지).
+- **전역 등록**: Python(`trace.set_tracer_provider`)과 Node(`provider.register()`)는 재호출해도
+  마지막 값으로 조용히 덮어써지지만, Java의 `GlobalOpenTelemetry.set()`은 JVM당 단 한 번만
+  허용되고 재호출 시 예외를 던진다. `KlaroApm.init()`은 자체 상태 캐시로 idempotent하지만 전역
+  싱글턴 등록은 강제하지 않는다 — 필요하면 호출측이 `GlobalOpenTelemetry.set(KlaroApm.init(...))`
+  을 직접(한 번만) 호출한다.
+- **자동계측(HOW-11 "agent 또는 SDK")**: 순수 SDK 임베딩 경로(`KlaroApm.init()`)는 임의
+  라이브러리를 자동계측하지 않는다(Python 코어와 동일). Spring Boot는 위 starter 조합으로 제로
+  코드 자동계측을 제공하고, 그 외 프레임워크는 공식 OTel Java agent를 붙이는 경로를 문서화했다
+  (`sdk/klaro-apm-java/README.md`).
