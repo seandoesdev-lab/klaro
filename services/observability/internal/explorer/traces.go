@@ -47,6 +47,15 @@ type Span struct {
 	Start      int64   `json:"start"`
 	DurationMS float64 `json:"duration_ms"`
 	Status     string  `json:"status"`
+	// Host is the resource's service.instance.id - the host_ident the SDK
+	// contract normalises (sdk/SDK_CONTRACT.md section 3).
+	//
+	// It is the secondary correlation key. trace_id joins a span to its log
+	// lines, but a metric series carries no trace id at all - a counter is not
+	// per-request - so a span reaches its metrics through service + host and
+	// nothing else. Without it a span's metrics tab would have to guess which
+	// instance it was looking at.
+	Host string `json:"host,omitempty"`
 }
 
 // Trace is the waterfall response.
@@ -231,10 +240,16 @@ func (c *Client) GetTrace(ctx context.Context, orgID, traceID string) (Trace, er
 
 	out := Trace{TraceID: traceID, Spans: []Span{}}
 	for _, batch := range raw.Batches {
-		service := ""
+		service, host := "", ""
 		for _, a := range batch.Resource.Attributes {
-			if a.Key == "service.name" && a.Value.StringValue != nil {
+			if a.Value.StringValue == nil {
+				continue
+			}
+			switch a.Key {
+			case "service.name":
 				service = *a.Value.StringValue
+			case "service.instance.id":
+				host = *a.Value.StringValue
 			}
 		}
 		for _, ss := range batch.ScopeSpans {
@@ -246,6 +261,7 @@ func (c *Client) GetTrace(ctx context.Context, orgID, traceID string) (Trace, er
 					ParentSpanID: normalizeID(s.ParentSpanID),
 					Name:         s.Name,
 					Service:      service,
+					Host:         host,
 					Start:        start / int64(time.Millisecond),
 					DurationMS:   float64(end-start) / float64(time.Millisecond),
 					Status:       spanStatus(s.Status.Code),

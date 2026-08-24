@@ -260,6 +260,32 @@ textarea.input { resize: vertical; min-height: 62px; }
 .wf-ms { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; color: var(--muted); }
 .wf-ms.hot { color: var(--crit); font-weight: 700; }
 
+/* ============ 플레임그래프 · 오류 지점 (P1a 연계분석) ============ */
+/* 깊이=y, 시간=x. 스팬 수가 많아도 한 화면에 들어와야 하므로 행 높이를 조밀하게 둔다. */
+.flame { overflow-x: auto; margin-top: 10px; }
+.flame svg { display: block; }
+/* stroke가 surface 색인 이유: 인접한 같은 색 막대의 경계를 배경으로 갈라 보이게 한다. */
+.flame-rect { cursor: pointer; stroke: var(--surface); stroke-width: 1; transition: filter .12s ease, stroke .12s ease; }
+.flame-rect:hover { filter: brightness(1.15); }
+.flame-rect.is-selected { stroke: var(--ink); stroke-width: 1.6; filter: brightness(1.2); }
+/* 라벨은 채워진 막대 위에 얹히므로 배경색 계열(--bg)이 대비가 가장 크다. */
+.flame-label { font-family: var(--mono); font-size: 10px; fill: var(--bg); font-weight: 650; }
+.flame-foot { display: flex; flex-wrap: wrap; gap: var(--sp-2) 14px; align-items: baseline; margin-top: var(--sp-2); }
+.flame-legend { display: flex; flex-wrap: wrap; gap: var(--sp-1) 12px; margin-left: auto; font-size: 11px; color: var(--ink-2); }
+.flame-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.flame-legend .swatch { width: 10px; height: 10px; border-radius: 3px; }
+
+/* 워터폴 행도 선택 대상이 된다(플레임그래프와 같은 선택 상태를 공유). */
+.wf-row.is-selected { background: var(--accent-soft); border-radius: 4px; }
+.wf-row[tabindex] { cursor: pointer; }
+.wf-row[tabindex]:hover { background: var(--surface-2); border-radius: 4px; }
+.wf-row[tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.err-groups { display: flex; flex-direction: column; gap: 6px; }
+.err-group { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; cursor: pointer; background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--crit); border-radius: 8px; padding: 7px 11px; font-size: 12.5px; color: var(--ink); }
+.err-group:hover { background: var(--crit-soft); }
+.err-group.is-selected { background: var(--crit-soft); border-color: var(--crit); }
+
 /* ============ 로그 뷰 ============ */
 .log-view { font-family: var(--mono); font-size: 11.5px; border: 1px solid var(--border); border-radius: 8px; max-height: 520px; overflow: auto; background: var(--surface); }
 .log-row { display: grid; grid-template-columns: 160px 58px 1fr; gap: 10px; padding: 5px var(--sp-3); border-bottom: 1px solid var(--grid); align-items: start; }

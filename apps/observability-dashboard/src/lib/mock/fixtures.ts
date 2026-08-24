@@ -17,9 +17,13 @@ import type {
   AlertEventFilter,
   AlertRule,
   AlertRuleInput,
+  CorrelatedMetric,
+  CorrelatedTrace,
+  CorrelationScope,
   Dashboard,
   DashboardInput,
   LogsPage,
+  LogEntry,
   MetricsResult,
   Quota,
   Resolution,
@@ -545,5 +549,127 @@ export function mockQuota(): Quota {
     hosts_exceeded: false,
     ingest_exceeded: false,
     overage: false,
+  };
+}
+
+/* --------------------------------------------------- trace correlation --- */
+
+/** A host_ident in the format the SDK contract normalises (section 3). */
+function mockHost(service: string): string {
+  return "pod:" + hashString("host:" + service).toString(16).padStart(8, "0");
+}
+
+/**
+ * One trace joined to its logs and metrics, shaped exactly like
+ * explorer.Correlated.
+ *
+ * The log lines are derived from the spans rather than drawn independently. The
+ * whole point of the screen is that a line belongs to a span, so mock data whose
+ * timestamps fell outside their span would make the correlation look broken
+ * while the code was right.
+ */
+export function mockCorrelated(traceId: string): CorrelatedTrace {
+  const spans = mockTrace(traceId).spans.map((s) => ({ ...s, host: mockHost(s.service) }));
+
+  const traceStart = Math.min(...spans.map((s) => s.start));
+  const traceEnd = Math.max(...spans.map((s) => s.start + s.duration_ms));
+  const padMs = 30_000;
+
+  // Scopes, grouped and ordered the way explorer.scopesOf does.
+  const byScope = new Map<string, CorrelationScope>();
+  for (const s of spans) {
+    const key = s.service + " " + s.host;
+    const scope: CorrelationScope = byScope.get(key) ?? {
+      service: s.service,
+      host: s.host,
+      spans: 0,
+      duration_ms: 0,
+      errors: 0,
+    };
+    scope.spans += 1;
+    scope.duration_ms += s.duration_ms;
+    if (s.status === "error") scope.errors += 1;
+    byScope.set(key, scope);
+  }
+  const scopes = [...byScope.values()].sort((a, b) => b.duration_ms - a.duration_ms).slice(0, 4);
+
+  const rand = seeded(hashString("correlated:" + traceId));
+  const lines = [
+    { level: "INFO", text: "span started" },
+    { level: "WARN", text: "retrying upstream attempt=2" },
+    { level: "ERROR", text: "upstream psp timeout after 3000ms" },
+    { level: "INFO", text: "released connection to pool" },
+  ];
+
+  // Two to four lines per span, each stamped inside that span's own window.
+  const logs: LogEntry[] = spans.flatMap((s) => {
+    const count = 2 + Math.floor(rand() * 3);
+    return Array.from({ length: count }, (_, i) => {
+      const errorTail = s.status === "error" && i === count - 1;
+      const line = errorTail ? lines[2] : lines[Math.floor(rand() * lines.length)];
+      return {
+        ts: Math.round(s.start + (i / count) * Math.max(s.duration_ms, 1)),
+        level: line.level,
+        message: line.text + " name=" + s.name,
+        trace_id: traceId,
+        span_id: s.span_id,
+        labels: {
+          service_name: s.service,
+          service_instance_id: s.host,
+          deployment_env: "prod",
+        },
+      };
+    });
+  });
+  logs.sort((a, b) => b.ts - a.ts);
+
+  const metricNames = [
+    "http_server_duration_seconds",
+    "http_server_requests_total",
+    "process_cpu_utilization",
+  ];
+  const metrics: CorrelatedMetric[] = scopes.flatMap((scope) =>
+    metricNames.map((metric) => {
+      const res = mockMetrics({
+        metric,
+        fromMs: traceStart - padMs,
+        toMs: traceEnd + padMs,
+        stepSec: 15,
+        agg: "",
+        serviceFilter: scope.service,
+      });
+      return {
+        key: metric + "@" + scope.service + "/" + scope.host,
+        metric,
+        service: scope.service,
+        host: scope.host,
+        series: res.series,
+        resolution: res.resolution,
+        query:
+          metric +
+          '{klaro_org_id="mock",service_instance_id="' +
+          scope.host +
+          '",service_name="' +
+          scope.service +
+          '"}',
+      };
+    }),
+  );
+
+  return {
+    trace_id: traceId,
+    spans,
+    from: new Date(traceStart - padMs).toISOString(),
+    to: new Date(traceEnd + padMs).toISOString(),
+    scopes,
+    logs,
+    logs_query: '{klaro_org_id="mock"} | trace_id = "' + traceId + '"',
+    // obsplane caps the fan-out at twelve queries and says so in a note. The
+    // mock reproduces that state or the note handling is never exercised.
+    metrics: metrics.slice(0, 12),
+    notes:
+      metrics.length > 12
+        ? ["metric correlation stopped at the 12 query limit; narrow the metric list"]
+        : undefined,
   };
 }

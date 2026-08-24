@@ -40,7 +40,19 @@ function orderDepthFirst(spans: Span[]): Array<{ span: Span; depth: number }> {
   return out;
 }
 
-export function TraceWaterfall({ spans }: { spans: Span[] }) {
+export interface TraceWaterfallProps {
+  spans: Span[];
+  /** Highlighted span, kept in step with the flame graph and the span table. */
+  selectedSpanId?: string;
+  /**
+   * Selecting a row drives the correlation panel below the chart. Rows become
+   * focusable only when a handler is given: a non-interactive row announced as
+   * interactive is a worse default than a plain one.
+   */
+  onSelect?: (span: Span) => void;
+}
+
+export function TraceWaterfall({ spans, selectedSpanId, onSelect }: TraceWaterfallProps) {
   if (spans.length === 0) return null;
 
   const traceStart = Math.min(...spans.map((s) => s.start));
@@ -56,7 +68,24 @@ export function TraceWaterfall({ spans }: { spans: Span[] }) {
           const width = Math.max((span.duration_ms / total) * 100, 0.4);
           const hot = span.status === "error" || span.duration_ms / total >= HOT_SHARE;
           return (
-            <div className="wf-row" key={span.span_id} role="listitem">
+            <div
+              className={span.span_id === selectedSpanId ? "wf-row is-selected" : "wf-row"}
+              key={span.span_id}
+              role="listitem"
+              onClick={onSelect ? () => onSelect(span) : undefined}
+              onKeyDown={
+                onSelect
+                  ? (e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        onSelect(span);
+                      }
+                    }
+                  : undefined
+              }
+              tabIndex={onSelect ? 0 : undefined}
+              aria-selected={onSelect ? span.span_id === selectedSpanId : undefined}
+            >
               <span className="wf-name" title={span.service + " · " + span.name}>
                 <span style={{ paddingLeft: depth * 12 }}>
                   {span.name} <span className="wf-svc">{span.service}</span>
