@@ -17,7 +17,12 @@ import { config } from "@/lib/config";
 import { useLive } from "@/hooks/useLive";
 
 const THEME_KEY = "klaro-obs-theme";
-type Theme = "light" | "dark" | "system";
+/**
+ * Dark-first: "dark" is the unconditional default, not a stand-in for "follow
+ * the OS". There is no "system" state - globals.css no longer reacts to
+ * prefers-color-scheme, so the only way to reach light is this toggle.
+ */
+type Theme = "light" | "dark";
 
 function BrandMark() {
   return (
@@ -164,23 +169,26 @@ function LiveChip() {
 }
 
 function ThemeToggle() {
-  const [theme, setTheme] = useState<Theme>("system");
+  const [theme, setTheme] = useState<Theme>("dark");
 
   // Read the stored choice after mount: the server render cannot know it, and
   // reading it during render would produce a hydration mismatch.
   useEffect(() => {
     const stored = window.localStorage.getItem(THEME_KEY);
-    if (stored === "light" || stored === "dark") setTheme(stored);
+    if (stored === "light") setTheme("light");
   }, []);
 
   useEffect(() => {
     const root = document.documentElement;
-    if (theme === "system") {
+    if (theme === "dark") {
+      // No attribute needed: :root's own defaults are already dark. Clearing
+      // it (and the stored choice) is what makes "dark" the true default
+      // rather than just another explicit option.
       root.removeAttribute("data-theme");
       window.localStorage.removeItem(THEME_KEY);
     } else {
-      root.setAttribute("data-theme", theme);
-      window.localStorage.setItem(THEME_KEY, theme);
+      root.setAttribute("data-theme", "light");
+      window.localStorage.setItem(THEME_KEY, "light");
     }
   }, [theme]);
 
