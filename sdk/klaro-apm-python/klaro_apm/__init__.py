@@ -18,12 +18,20 @@ FastAPI::
 
 from ._version import __version__
 from .config import KlaroConfig
+from .correlation import (
+    KlaroCorrelationFilter,
+    correlation_fields,
+    install_log_correlation,
+)
 from .fastapi import init_fastapi
 from .tracing import init, shutdown
 
 __all__ = [
     "__version__",
     "KlaroConfig",
+    "KlaroCorrelationFilter",
+    "correlation_fields",
+    "install_log_correlation",
     "init",
     "shutdown",
     "init_fastapi",

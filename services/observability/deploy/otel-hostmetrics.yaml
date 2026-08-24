@@ -1,0 +1,110 @@
+# klaro 호스트 에이전트 — 인프라 호스트 메트릭 수집(P1b / OBS-01)
+#
+#   [이 에이전트] --hostmetrics--> OTLP(klaro-obs-key) --> otel-collector(게이트웨이)
+#                                                        --> VictoriaMetrics(AccountID=org)
+#
+# 게이트웨이(otel-collector.yaml)가 아니라 별도 에이전트인 이유:
+# 게이트웨이의 테넌트는 **요청 컨텍스트**에서 온다(klaroauth가 klaro-obs-key를
+# 검증해 org를 컨텍스트에 심고, klarotenant가 그 값을 데이터에 각인한다).
+# 스크레이프는 요청이 아니므로 컨텍스트가 없고, 게이트웨이 안에 hostmetrics
+# 파이프라인을 두면 klarotenant가 테넌트를 찾지 못해 배치를 버린다
+# (require_tenant: true). 테넌트를 우회해 고정 org를 각인하는 경로를 새로 뚫는
+# 것은 "SDK가 보낸 값이 아니라 CP가 준 값만 테넌트가 된다"는 불변식을 깨는
+# 일이라, 대신 표준 agent→gateway 위상을 쓴다. 에이전트는 다른 SDK와 똑같이
+# 수집 키로 인증하므로 org 각인·쿼터 계량·VM 라우팅이 전부 기존 경로 그대로다.
+#
+# 전부 OSS다([COST-05]): 업스트림 opentelemetry-collector-contrib 이미지의
+# hostmetrics 리시버 + 표준 프로세서/익스포터만 쓴다. 새 유료 의존성 없음.
+receivers:
+  # cpu / memory / disk / filesystem / network / load — 요구 범위 그대로.
+  hostmetrics:
+    collection_interval: 15s
+    scrapers:
+      cpu:
+        metrics:
+          # 기본은 system.cpu.time(카운터)만 켜져 있다. 호스트맵 셀은 "지금 몇
+          # 퍼센트"를 물으므로 비율 게이지가 필요하다.
+          system.cpu.utilization:
+            enabled: true
+      memory:
+        metrics:
+          system.memory.utilization:
+            enabled: true
+      load:
+      disk:
+      filesystem:
+        metrics:
+          # 사용량(바이트)만 기본이라 "얼마나 찼는가"를 물으려면 비율을 켜야
+          # 한다. 컨테이너 안에서는 마운트가 전부 제외되어 아무것도 안 나올 수
+          # 있다(root_path 미설정 경고) — 그 경우 disk_pct는 null로 남고 화면은
+          # "보고 없음"으로 표시한다. 실 호스트 배포에서 /hostfs를 붙이면 채워진다.
+          system.filesystem.utilization:
+            enabled: true
+      network:
+
+processors:
+  memory_limiter:
+    check_interval: 2s
+    limit_percentage: 75
+    spike_limit_percentage: 20
+
+  # 호스트 정체성. system 디텍터가 host.name / host.id / os.type을 붙인다.
+  # env 디텍터를 앞에 두어 OTEL_RESOURCE_ATTRIBUTES로 덮어쓸 수 있게 한다
+  # (컨테이너 안에서 감지한 이름보다 운영자가 지정한 이름이 우선).
+  resourcedetection:
+    detectors: [env, system]
+    system:
+      hostname_sources: [os]
+      resource_attributes:
+        host.name:
+          enabled: true
+        host.id:
+          enabled: true
+        os.type:
+          enabled: true
+
+  # host.name → service.instance.id 정합(host_ident 규약, 설계 HOW-4).
+  #
+  # 이 한 줄이 인벤토리 조인의 전부다: klarousage는 service.instance.id를
+  # observability_hosts.host_ident로 올리고, prometheusremotewrite 익스포터는
+  # 같은 값을 시리즈의 `instance` 라벨로 쓴다. 두 쪽이 같은 문자열이어야만
+  # 레지스트리 행과 시계열이 같은 호스트로 이어진다. host.name이 없으면
+  # host.id로 물러선다 — 이름 없는 호스트를 빈 문자열로 등록하면 모든 호스트가
+  # 한 행으로 합쳐진다.
+  transform/host_ident:
+    metric_statements:
+      - context: resource
+        statements:
+          - set(attributes["service.instance.id"], attributes["host.name"]) where attributes["service.instance.id"] == nil
+          - set(attributes["service.instance.id"], attributes["host.id"]) where attributes["service.instance.id"] == nil
+          - set(attributes["service.name"], "klaro-host-agent") where attributes["service.name"] == nil
+          - set(attributes["deployment.environment"], "${env:KLARO_HOST_ENV}") where attributes["deployment.environment"] == nil
+
+  batch:
+    timeout: 5s
+    send_batch_size: 2048
+
+exporters:
+  otlp/gateway:
+    endpoint: ${env:KLARO_GATEWAY_ENDPOINT}
+    headers:
+      # 게이트웨이의 klaroauth가 검증하는 수집 키. 다른 SDK와 같은 자격증명이고,
+      # org는 이 키로부터 CP가 결정한다 — 에이전트가 주장할 수 없다.
+      klaro-obs-key: ${env:KLARO_OBS_KEY}
+    tls:
+      # 개발 compose 전용(게이트웨이 OTLP가 평문). 프로덕션은 SDK와 동일하게
+      # mTLS다(CLAUDE.md: APM SDK↔Collector mTLS 필수) — 그 경우 이 블록을
+      # ca_file/cert_file/key_file로 대체한다.
+      insecure: true
+    retry_on_failure:
+      enabled: true
+
+service:
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    metrics:
+      receivers: [hostmetrics]
+      processors: [memory_limiter, resourcedetection, transform/host_ident, batch]
+      exporters: [otlp/gateway]

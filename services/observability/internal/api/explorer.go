@@ -215,3 +215,47 @@ func (d Deps) getLogs(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, page)
 }
+
+// getCorrelated joins one trace to its logs and its services metrics
+// [OBS-03/04/05, APM-03].
+//
+// It is the same server-side org enforcement as every other explorer route -
+// the handler never sees an org from the caller, only the one the tenancy
+// middleware resolved - and the join runs entirely inside the Explorer, so the
+// Tempo/Loki tenant header and the injected klaro_org_id matcher apply to all
+// three reads.
+func (d Deps) getCorrelated(c *gin.Context) {
+	orgID, ok := tenancy.FromGin(c)
+	if !ok {
+		httpx.Internal(c, "org not resolved")
+		return
+	}
+	padSec, ok := intQuery(c, "pad_sec")
+	if !ok {
+		httpx.Validation(c, "pad_sec must be a non-negative number of seconds", nil)
+		return
+	}
+	logLimit, ok := intQuery(c, "log_limit")
+	if !ok {
+		httpx.Validation(c, "log_limit must be a non-negative integer", nil)
+		return
+	}
+	stepSec, ok := intQuery(c, "step")
+	if !ok {
+		httpx.Validation(c, "step must be a non-negative number of seconds", nil)
+		return
+	}
+
+	out, err := d.Explorer.Correlate(c.Request.Context(), orgID, explorer.CorrelateQuery{
+		TraceID:  c.Param("traceId"),
+		Pad:      time.Duration(padSec) * time.Second,
+		LogLimit: logLimit,
+		Metrics:  c.QueryArray("metric"),
+		Step:     time.Duration(stepSec) * time.Second,
+	})
+	if err != nil {
+		writeExplorerError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}

@@ -102,6 +102,7 @@ SemVer. wrapper 공개 API(설정 키 이름, 함수 시그니처)의 breaking c
 | mTLS 옵션 | `klaro_apm/tracing.py` (`_build_channel_credentials`) |
 | 초기화/샘플링/배치 | `klaro_apm/tracing.py` (`init`, `build_tracer_provider`) |
 | FastAPI 헬퍼 | `klaro_apm/fastapi.py` (`init_fastapi`) |
+| 로그 상관키(§12) | `klaro_apm/correlation.py` (`install_log_correlation`, `correlation_fields`) |
 
 ## 10. Node 구현 매핑
 
@@ -114,6 +115,7 @@ SemVer. wrapper 공개 API(설정 키 이름, 함수 시그니처)의 breaking c
 | 초기화/샘플링/배치 | `src/tracing.ts` (`init`, `buildTracerProvider`) |
 | Express 헬퍼 | `src/express.ts` (`initExpress`) — `@opentelemetry/instrumentation-express`는 optional peer dependency |
 | Fastify 헬퍼 | `src/fastify.ts` (`initFastify`) — `@opentelemetry/instrumentation-fastify`는 optional peer dependency |
+| 로그 상관키(§12) | `src/correlation.ts` (`correlationFields`, `withCorrelation`) |
 
 **§5 drop-oldest 관련 Node 특이사항**: OTel JS 표준 `BatchSpanProcessor`는 큐 포화 시
 drop-newest(신규 span 거부)라서 §5가 요구하는 drop-oldest와 반대다. Python은 `deque(maxlen=N)`이
@@ -132,6 +134,7 @@ drop-newest(신규 span 거부)라서 §5가 요구하는 drop-oldest와 반대�
 | mTLS 옵션 | `KlaroApm.buildExporter()`(`setTrustedCertificates`/`setClientTls`) |
 | 초기화/샘플링/배치 | `src/main/java/io/klaro/apm/KlaroApm.java` (`init`, `buildTracerProvider`) |
 | Spring Boot 헬퍼 | `src/main/java/io/klaro/apm/spring/KlaroApmEnvironmentPostProcessor.java` — `spring-boot`는 compileOnly(선택 의존성), 실제 자동계측은 공식 `io.opentelemetry.instrumentation:opentelemetry-spring-boot-starter`와 조합해 "starter" 형태로 제공 |
+| 로그 상관키(§12) | `src/main/java/io/klaro/apm/Correlation.java` (`fields`, `traceId`, `spanId`) |
 
 **§5 drop-oldest 관련 Java 특이사항**: OTel Java 표준 `BatchSpanProcessor`도 Node와 동일하게
 drop-newest다(`Worker.addSpan()`이 고정 크기 큐에 `offer()`만 시도하고 실패하면 새 span을 버림 —
@@ -154,3 +157,68 @@ push만 하고 반환하는 것으로 보장). 실제 네트워크 전송/실패
   라이브러리를 자동계측하지 않는다(Python 코어와 동일). Spring Boot는 위 starter 조합으로 제로
   코드 자동계측을 제공하고, 그 외 프레임워크는 공식 OTel Java agent를 붙이는 경로를 문서화했다
   (`sdk/klaro-apm-java/README.md`).
+
+## 12. 상관키 규약 (로그↔트레이스↔메트릭)
+
+관측 플랫폼의 연계분석 엔드포인트(`GET /orgs/:orgId/obs/traces/:traceId/correlated`)는 하나의
+트레이스를 **그 안에서 쓰인 로그**와 **그 서비스·호스트의 메트릭**에 조인한다. 조인 키는 방향마다
+다르고, 언어 SDK가 책임지는 부분도 다르다.
+
+| 방향 | 조인 키 | 실리는 위치 | 정확도 |
+|---|---|---|---|
+| 트레이스 → 로그 | `trace_id` (+ `span_id`) | **로그 레코드**(속성/structured metadata) | 정확 |
+| 트레이스 → 메트릭 | `service.name` + `service.instance.id` | **리소스 속성** | 근사(같은 프로세스·같은 구간) |
+
+### 12.1 키 이름과 형식
+
+- 이름은 정확히 `trace_id`, `span_id`다. Loki의 OTLP 수신기가 로그 레코드의 트레이스 컨텍스트를
+  structured metadata에 넣을 때 쓰는 이름이며, 백엔드의 상관 조회
+  (`services/observability/internal/explorer/logs.go`)가 이 이름으로 LogQL label filter를 만든다.
+  다른 이름을 쓰면 조회는 **에러가 아니라 빈 결과**가 된다.
+- 형식은 소문자 16진수: `trace_id` 32자, `span_id` 16자. W3C traceparent와 OTel `format_trace_id`의
+  형식이다.
+- **스팬이 없을 때 0으로 채워진 id를 만들어내지 않는다.** OTel의 invalid SpanContext는 trace_id가
+  전부 0인 정상 값처럼 보이므로, 그대로 로그에 찍히면 존재하지 않는 트레이스를 조회하게 만든다.
+  스팬이 없으면 키를 생략하거나 빈 문자열을 쓴다.
+
+### 12.2 `trace_id`는 리소스 속성이 아니다
+
+리소스는 **프로세스 단위** 속성이고 trace_id는 **요청 단위** 값이다. 리소스에 실으면 그 프로세스의
+모든 텔레메트리가 하나의 트레이스에 속한 것으로 표시된다. `trace_id`/`span_id`는 반드시 로그
+레코드(또는 그 속성)에 싣는다. 리소스가 담당하는 것은 §3의 `service.name`/`service.instance.id`,
+즉 **메트릭 방향의 2차 키**다 — 메트릭 시리즈에는 trace_id가 존재할 수 없으므로(카운터는 요청
+단위가 아니다) 스팬은 서비스+호스트로만 자기 메트릭에 도달한다.
+
+또한 `trace_id`를 **Loki 스트림 라벨로 색인하지 않는다**. 요청마다 값이 달라 카디널리티가 무한하므로
+요청당 스트림 하나가 만들어진다. structured metadata에 두고 label filter로 조회하는 것이 규약이다.
+
+### 12.3 SDK가 하는 일 / 하지 않는 일
+
+klaro-apm은 **로그 파이프라인을 소유하지 않는다.** 고객 애플리케이션의 로그는 자체 로거로 나가고,
+SDK는 그 로거를 교체하지 않는다(관측 SDK가 로깅 설정을 가져가는 것은 thin wrapper가 아니다).
+SDK가 제공하는 것은 **현재 스팬 컨텍스트를 로그 한 줄에 붙일 수 있는 형태로 노출하는 것**뿐이다.
+
+OTel 공식 로그 브리지/MDC appender(예: `opentelemetry-logback-mdc`, `LoggingInstrumentor`)를
+사용하는 애플리케이션은 이미 같은 키가 붙으므로 이 API가 필요 없다. 아래는 그 의존성을 강제하지
+않는 최소 경로다.
+
+| 언어 | API | 위치 |
+|---|---|---|
+| Python | `install_log_correlation()`(logging.Filter 부착), `correlation_fields()` | `klaro_apm/correlation.py` |
+| Node | `correlationFields()`, `withCorrelation(payload)` | `src/correlation.ts` |
+| Java | `Correlation.fields()`, `Correlation.traceId()`, `Correlation.spanId()` | `io/klaro/apm/Correlation.java` |
+
+Python만 전역 훅(`logging.Filter`)을 제공하는 이유: Python에는 표준 logging 파이프라인이 있어 필터
+하나로 모든 레코드를 덮을 수 있다. Node/Java에는 그런 단일 지점이 없어(pino mixin, winston format,
+logback MDC가 서로 다르다) 특정 로깅 라이브러리를 특별대우하는 대신 **어느 로거에도 넣을 수 있는
+값**을 반환한다. Java는 MDC에 직접 쓰지 않는다 — MDC는 스레드 로컬이라 SDK가 넣으면 지우는 책임까지
+져야 하고, 스레드 풀에서 지우지 못한 값은 다음 요청의 로그에 남는다. 조용히 틀린 상관은 상관이
+없는 것보다 나쁘므로 수명은 호출측(try-with-resources)에 맡긴다.
+
+### 12.4 상관이 비어 보일 때
+
+`correlated` 응답의 `notes`에 "no log line carries this trace id"가 오면, 원인은 대부분 로그가
+없는 것이 아니라 **로그에 키가 없는 것**이다. 확인 순서: (1) 애플리케이션이 위 API 또는 OTel 로그
+브리지로 `trace_id`를 붙이는지, (2) 로그를 만든 코드가 실제로 스팬 안에서 실행되는지(백그라운드
+워커는 부모 컨텍스트를 상속하지 않는 경우가 많다), (3) 로그가 Collector의 logs 파이프라인을 통해
+Loki에 들어가는지.

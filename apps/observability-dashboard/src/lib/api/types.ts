@@ -100,6 +100,8 @@ export interface Span {
   start: number;
   duration_ms: number;
   status: string;
+  /** The resource service.instance.id: this span join key for metrics. */
+  host?: string;
 }
 
 /** internal/explorer.Trace */
@@ -114,6 +116,9 @@ export interface LogEntry {
   ts: number;
   level: string;
   message: string;
+  /** Correlation keys, promoted out of Loki structured metadata. */
+  trace_id?: string;
+  span_id?: string;
   labels: Record<string, string>;
 }
 
@@ -122,6 +127,55 @@ export interface LogsPage {
   data: LogEntry[];
   next?: string;
   query: string;
+}
+
+/* ---------------------------------------------------------- correlation -- */
+
+/**
+ * internal/explorer.CorrelationScope - one service+host pair the trace touched.
+ *
+ * Returned so the metric list is explainable: these series were chosen because
+ * this instance held the span that took most of the time.
+ */
+export interface CorrelationScope {
+  service: string;
+  host?: string;
+  spans: number;
+  /** Summed span duration, not wall clock: concurrent siblings both count. */
+  duration_ms: number;
+  errors: number;
+}
+
+/** internal/explorer.CorrelatedMetric */
+export interface CorrelatedMetric {
+  /** Unique within a response; safe to use as a React key. */
+  key: string;
+  metric: string;
+  service: string;
+  host?: string;
+  series: Series[];
+  resolution: Resolution;
+  query: string;
+}
+
+/**
+ * internal/explorer.Correlated - one trace joined to its logs and metrics.
+ *
+ * `notes` is not decoration. A signal obsplane could not read comes back as an
+ * empty list plus a note, so a view that ignores notes shows "nothing was
+ * logged" when the truth is "the logs backend is down".
+ */
+export interface CorrelatedTrace {
+  trace_id: string;
+  spans: Span[];
+  /** The padded window the logs and metrics were read over (RFC3339). */
+  from: string;
+  to: string;
+  scopes: CorrelationScope[];
+  logs: LogEntry[];
+  logs_query?: string;
+  metrics: CorrelatedMetric[];
+  notes?: string[];
 }
 
 /* ------------------------------------------------------------- alerting -- */
@@ -291,6 +345,96 @@ export interface Quota {
   hosts_exceeded: boolean;
   ingest_exceeded: boolean;
   overage: boolean;
+}
+
+/* --------------------------------------------------- infrastructure -- */
+
+/**
+ * internal/explorer.HostVitals.
+ *
+ * Every reading is nullable because the Go side made it a pointer: null is
+ * "this host reports no such metric", which is a different fact from 0 and has
+ * to stay different all the way to the cell that renders it.
+ */
+export interface HostVitals {
+  cpu_pct: number | null;
+  mem_pct: number | null;
+  disk_pct: number | null;
+  load1: number | null;
+}
+
+/**
+ * internal/inventory.Host - a registry row with its latest readings.
+ *
+ * status is "stale", never "down": the platform observes reporting, not
+ * reachability (inventory.StatusStale says why).
+ */
+export interface Host extends HostVitals {
+  host_ident: string;
+  service?: string;
+  env?: string;
+  first_seen_at: string;
+  last_seen_at: string;
+  status: "up" | "stale";
+}
+
+/** internal/inventory.Result */
+export interface HostsResult {
+  data: Host[];
+  active_window_sec: number;
+  total: number;
+  active: number;
+  /** False when the readings could not be fetched; the registry half still is. */
+  metrics_available: boolean;
+}
+
+/** internal/explorer.HostSeriesKeys, in display order. */
+export const HOST_SERIES_KEYS = [
+  "cpu_pct",
+  "mem_pct",
+  "disk_pct",
+  "load1",
+  "net_rx_bps",
+  "net_tx_bps",
+  "disk_read_bps",
+  "disk_write_bps",
+] as const;
+export type HostSeriesKey = (typeof HOST_SERIES_KEYS)[number];
+
+/** internal/explorer.HostSeriesResult */
+export interface HostSeriesResult {
+  host_ident: string;
+  series: Partial<Record<HostSeriesKey, Series>>;
+  clamped: boolean;
+  from: string;
+  to: string;
+  /** The MetricsQL obsplane generated per series, returned read-only. */
+  queries: Partial<Record<HostSeriesKey, string>>;
+}
+
+/** internal/explorer.UptimeHost */
+export interface UptimeHost {
+  host_ident: string;
+  observed_buckets: number;
+  expected_buckets: number;
+  /** 0..1, observed over expected. */
+  availability: number;
+  met: boolean;
+}
+
+/** internal/explorer.UptimeResult */
+export interface UptimeResult {
+  /** 0..1 objective the achievement is measured against. */
+  target: number;
+  step_sec: number;
+  from: string;
+  to: string;
+  clamped: boolean;
+  hosts: UptimeHost[];
+  availability: number;
+  observed_buckets: number;
+  expected_buckets: number;
+  query: string;
 }
 
 /** Envelope obsplane uses for every list endpoint. */

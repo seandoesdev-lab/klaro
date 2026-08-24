@@ -15,8 +15,11 @@ import type {
   AlertEventFilter,
   AlertRule,
   AlertRuleInput,
+  CorrelatedTrace,
   Dashboard,
   DashboardInput,
+  HostSeriesResult,
+  HostsResult,
   ListEnvelope,
   LogsPage,
   Matcher,
@@ -24,6 +27,7 @@ import type {
   Quota,
   Trace,
   TracesResult,
+  UptimeResult,
 } from "./types";
 
 /** obsplane parses RFC3339 or a unix timestamp; ISO is the unambiguous one. */
@@ -126,6 +130,42 @@ export async function searchTraces(args: TracesArgs): Promise<TracesResult> {
 export async function getTrace(traceId: string, signal?: AbortSignal): Promise<Trace> {
   if (config.mock) return mock.delay(mock.mockTrace(traceId));
   return request<Trace>("/obs/traces/" + encodeURIComponent(traceId), { signal });
+}
+
+export interface CorrelatedArgs {
+  /** Widens the window around the trace, in seconds. obsplane caps this. */
+  padSec?: number;
+  logLimit?: number;
+  /** Metric names; empty means obsplane picks its default correlation set. */
+  metrics?: string[];
+  stepSec?: number;
+  signal?: AbortSignal;
+}
+
+/**
+ * One trace joined to its logs and its services metrics.
+ *
+ * A single call rather than three: the window, the service list and the host
+ * list are all derived from the spans server side, so a client that assembled
+ * this itself would have to re-derive them - and would get a different answer
+ * whenever a span arrived late.
+ */
+export async function getCorrelated(
+  traceId: string,
+  args: CorrelatedArgs = {},
+): Promise<CorrelatedTrace> {
+  if (config.mock) return mock.delay(mock.mockCorrelated(traceId));
+
+  const params = new URLSearchParams();
+  if (args.padSec && args.padSec > 0) params.set("pad_sec", String(args.padSec));
+  if (args.logLimit && args.logLimit > 0) params.set("log_limit", String(args.logLimit));
+  if (args.stepSec && args.stepSec > 0) params.set("step", String(args.stepSec));
+  for (const m of args.metrics ?? []) params.append("metric", m);
+
+  return request<CorrelatedTrace>(
+    "/obs/traces/" + encodeURIComponent(traceId) + "/correlated",
+    { params, signal: args.signal },
+  );
 }
 
 /* ----------------------------------------------------------------- logs -- */
@@ -245,6 +285,80 @@ export async function deleteDashboard(id: string): Promise<void> {
     return;
   }
   await request<void>("/obs/dashboards/" + encodeURIComponent(id), { method: "DELETE" });
+}
+
+/* --------------------------------------------------- infrastructure -- */
+
+/**
+ * The host fleet with its latest readings [OBS-01].
+ *
+ * There are no query parameters: which hosts exist and how recently one counts
+ * as active are server-side rules (the registry's RLS scope and the quota's
+ * active window), and letting the client pass either would let two screens
+ * disagree about the same fleet.
+ */
+export async function listHosts(signal?: AbortSignal): Promise<HostsResult> {
+  if (config.mock) return mock.delay(mock.mockHosts());
+  return request<HostsResult>("/obs/hosts", { signal });
+}
+
+export interface HostSeriesArgs {
+  hostIdent: string;
+  from: Date;
+  to: Date;
+  stepSec: number;
+  signal?: AbortSignal;
+}
+
+/** The cpu/memory/disk/load/network charts behind one hostmap cell. */
+export async function queryHostSeries(args: HostSeriesArgs): Promise<HostSeriesResult> {
+  if (config.mock) {
+    return mock.delay(
+      mock.mockHostSeries({
+        hostIdent: args.hostIdent,
+        fromMs: args.from.getTime(),
+        toMs: args.to.getTime(),
+        stepSec: args.stepSec,
+      }),
+    );
+  }
+  const params = new URLSearchParams({ from: iso(args.from), to: iso(args.to) });
+  if (args.stepSec > 0) params.set("step", String(args.stepSec));
+  return request<HostSeriesResult>(
+    "/obs/hosts/" + encodeURIComponent(args.hostIdent) + "/metrics",
+    { params, signal: args.signal },
+  );
+}
+
+export interface UptimeArgs {
+  from: Date;
+  to: Date;
+  /** Bucket size; a host counts as up in a bucket it reported in. */
+  stepSec?: number;
+  /** 0..1 objective. Omitted means the server default. */
+  target?: number;
+  hostIdent?: string;
+  signal?: AbortSignal;
+}
+
+/** Availability achieved over a window, as reporting coverage [OBS-01]. */
+export async function getUptime(args: UptimeArgs): Promise<UptimeResult> {
+  if (config.mock) {
+    return mock.delay(
+      mock.mockUptime({
+        fromMs: args.from.getTime(),
+        toMs: args.to.getTime(),
+        stepSec: args.stepSec ?? 60,
+        target: args.target ?? 0.99,
+        hostIdent: args.hostIdent,
+      }),
+    );
+  }
+  const params = new URLSearchParams({ from: iso(args.from), to: iso(args.to) });
+  if (args.stepSec && args.stepSec > 0) params.set("step", String(args.stepSec));
+  if (args.target) params.set("target", String(args.target));
+  if (args.hostIdent) params.set("host", args.hostIdent);
+  return request<UptimeResult>("/obs/slo/uptime", { params, signal: args.signal });
 }
 
 /* ----------------------------------------------------------------- quota -- */

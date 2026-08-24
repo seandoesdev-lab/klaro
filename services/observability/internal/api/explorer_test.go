@@ -13,6 +13,7 @@ var explorerRoutes = []string{
 	"/obs/metrics/query?metric=cpu",
 	"/obs/traces",
 	"/obs/traces/5b8efff798038103d269b633813fc60c",
+	"/obs/traces/5b8efff798038103d269b633813fc60c/correlated",
 	"/obs/logs",
 }
 
@@ -86,5 +87,39 @@ func TestExplorerReportsAMissingBackendAsBadGateway(t *testing.T) {
 	w := get(r, "/orgs/"+orgA+"/obs/metrics/query?metric=cpu", "Bearer dev")
 	if w.Code != http.StatusBadGateway {
 		t.Errorf("status = %d, want 502 (body %s)", w.Code, w.Body)
+	}
+}
+
+// The correlated route reads three backends behind one URL, so its parameter
+// validation is worth pinning at the edge: a bad value must be a 422 with the
+// shared envelope, not an upstream call with a nonsense window.
+func TestCorrelatedRouteValidatesItsParameters(t *testing.T) {
+	r := NewRouter(deps())
+	const trace = "5b8efff798038103d269b633813fc60c"
+
+	bad := []string{
+		"/obs/traces/" + trace + "/correlated?pad_sec=-1",
+		"/obs/traces/" + trace + "/correlated?log_limit=nope",
+		"/obs/traces/" + trace + "/correlated?step=-5",
+		// Past MaxCorrelationPad: the window of this endpoint is one trace.
+		"/obs/traces/" + trace + "/correlated?pad_sec=100000",
+		// A metric name is interpolated into MetricsQL.
+		"/obs/traces/" + trace + `/correlated?metric=cpu%22%7D+or+up%7B`,
+	}
+	for _, route := range bad {
+		w := get(r, "/orgs/"+orgA+route, "Bearer dev")
+		if w.Code != http.StatusUnprocessableEntity {
+			t.Errorf("GET %s = %d, want 422 (body %s)", route, w.Code, w.Body)
+		}
+	}
+}
+
+// A trace id that is not hex reaches an upstream URL path if it is not stopped
+// here, so the route rejects it before any backend is dialled.
+func TestCorrelatedRouteRejectsANonHexTraceID(t *testing.T) {
+	r := NewRouter(deps())
+	w := get(r, "/orgs/"+orgA+"/obs/traces/not-a-trace/correlated", "Bearer dev")
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want 422 (body %s)", w.Code, w.Body)
 	}
 }

@@ -78,6 +78,9 @@
 | 관측(상시) | GET `/orgs/:orgId/obs/metrics/query` | 메트릭 Explorer | member |
 | 관측(상시) | GET `/orgs/:orgId/obs/traces` · `/:traceId` | 트레이스 Explorer | member |
 | 관측(상시) | GET `/orgs/:orgId/obs/logs` | 로그 Explorer | member |
+| 관측(상시) | GET `/orgs/:orgId/obs/hosts` | 인프라 호스트 인벤토리(레지스트리 + 최신 cpu/mem) | member |
+| 관측(상시) | GET `/orgs/:orgId/obs/hosts/:hostIdent/metrics` | 호스트 상세 시계열 | member |
+| 관측(상시) | GET `/orgs/:orgId/obs/slo/uptime` | 업타임/가용성 SLO 달성률 | member |
 | 관측(상시) | CRUD `/orgs/:orgId/obs/alert-rules` | 알림 룰 | member |
 | 관측(상시) | GET `/orgs/:orgId/obs/alert-events` | 알림 이력 | member |
 | 관측(상시) | CRUD `/orgs/:orgId/obs/dashboards` | 대시보드/패널 | member |
@@ -303,7 +306,7 @@ Header: X-Report-Password: s3cret
 
 | 게이트 | 최소 역할 | 대상 |
 |--------|----------|------|
-| 조회 | `member` | `GET /obs/tenant` · `GET /obs/keys` · `GET /obs/quota` · Explorer(`metrics/query`·`traces`·`traces/:traceId`·`logs`) · `GET /obs/alert-rules[/:ruleId]` · `GET /obs/alert-events` · `GET /obs/dashboards[/:dashId]` · `GET /obs/live`(WS) |
+| 조회 | `member` | `GET /obs/tenant` · `GET /obs/keys` · `GET /obs/quota` · Explorer(`metrics/query`·`traces`·`traces/:traceId`·`traces/:traceId/correlated`·`logs`) · 인프라(`hosts`·`hosts/:hostIdent/metrics`·`slo/uptime`) · `GET /obs/alert-rules[/:ruleId]` · `GET /obs/alert-events` · `GET /obs/dashboards[/:dashId]` · `GET /obs/live`(WS) |
 | 변경 | `admin` | `POST/DELETE /obs/keys[/:keyId[/rotate]]` · `POST/PATCH/DELETE /obs/alert-rules[/:ruleId]` · `POST/PATCH/DELETE /obs/dashboards[/:dashId]` |
 
 조회 하한이 `viewer`가 아니라 `member`인 것은 의도다: 이 평면은 테넌트의 관측 이력 전체를 노출하므로 열람이 최저 권한일 수 없다. `viewer`는 klaro 전체 RBAC의 역할이고 상시 관측 평면에서는 아직 부여가 없다.
@@ -341,10 +344,94 @@ Header: X-Report-Password: s3cret
 { "trace_id": "abc", "spans": [ { "span_id": "s1", "parent_span_id": null, "service": "api-gateway", "name": "GET /orders", "duration_ms": 3480, "status": "ok" }, { "span_id": "s2", "parent_span_id": "s1", "service": "orders-svc", "name": "SELECT …", "duration_ms": 3200, "status": "ok" } ] }
 ```
 
+**GET** `/orgs/:orgId/obs/traces/:traceId/correlated` — 크로스시그널 연계분석 [OBS-03/04/05, APM-03]
+`?pad_sec&log_limit&step&metric`(metric 반복 가능, 생략 시 서버 기본 세트)
+
+하나의 트레이스를 **그 안에서 쓰인 로그**와 **그 서비스·호스트의 메트릭**에 조인해 한 번에 반환한다. 조인 키는 방향마다 다르고, 그 차이를 응답이 숨기지 않는다:
+
+- **트레이스→로그는 정확**하다. `trace_id`(+`span_id`)가 로그 레코드에 실려 있고(상관키 규약 `sdk/SDK_CONTRACT.md §12`), 서버가 `{klaro_org_id="<org>"} | trace_id = "<hex>"` 형태의 LogQL을 만든다. `trace_id`는 **스트림 라벨이 아니라 structured metadata의 label filter**다 — 요청마다 값이 달라 라벨로 색인하면 요청당 스트림 하나가 만들어진다.
+- **트레이스→메트릭은 근사**다. 메트릭 시리즈에는 trace_id가 존재할 수 없으므로(카운터는 요청 단위가 아니다) `service_name`+`service_instance_id`로만 조인한다. 어느 범위에서 온 시리즈인지 `scopes`/`metrics[].service|host`로 드러내, 근사임이 보이게 한다.
+
+**org 강제**: 트레이스를 먼저 읽고(Tempo `X-Scope-OrgID`) 그 결과로 창(window)과 범위를 만든다. 다른 org의 trace_id는 이 시점에서 404이고, 로그·메트릭 질의는 아예 만들어지지 않는다. 세 백엔드 모두 매퍼가 준 테넌트(VM AccountID 경로 세그먼트, Tempo/Loki 헤더) + 주입된 `klaro_org_id` 매처를 쓴다.
+
+**부분 실패는 부분 응답**: 트레이스 읽기 실패만 치명적(404/502)이고, 로그·메트릭은 best effort다. 읽지 못한 신호는 빈 배열 + `notes` 항목으로 온다 — 빈 배열만 주면 "조용했다"로 읽히기 때문이다. `notes`는 업스트림 응답 본문을 절대 그대로 담지 않는다(다른 테넌트의 라벨·내부 호스트명이 섞일 수 있다).
+
+**한도**: `pad_sec` ≤ 900(기본 30), 메트릭 팬아웃은 scope 4개 × 질의 12개까지이며 잘렸으면 `notes`에 적는다.
+
+```json
+{
+  "trace_id": "5b8efff798038103d269b633813fc60c",
+  "spans": [ { "span_id": "aaaa", "parent_span_id": null, "service": "web-bff", "host": "pod:aaaa1111", "start": 1756000000000, "duration_ms": 4000, "status": "unset" } ],
+  "from": "2026-08-23T23:59:30Z",
+  "to": "2026-08-24T00:00:34Z",
+  "scopes": [ { "service": "web-bff", "host": "pod:aaaa1111", "spans": 1, "duration_ms": 4000, "errors": 0 } ],
+  "logs": [ { "ts": 1756000003000, "level": "ERROR", "message": "psp timeout after 3000ms", "trace_id": "5b8e…", "span_id": "bbbb", "labels": { "service_name": "payments" } } ],
+  "logs_query": "{klaro_org_id=\"…\"} | trace_id = \"5b8e…\"",
+  "metrics": [ { "key": "process_cpu_utilization@web-bff/pod:aaaa1111", "metric": "process_cpu_utilization", "service": "web-bff", "host": "pod:aaaa1111", "series": [ { "labels": { "service_name": "web-bff" }, "points": [ [1756000000000, 0.81] ] } ], "resolution": "raw", "query": "process_cpu_utilization{klaro_org_id=\"…\",service_instance_id=\"pod:aaaa1111\",service_name=\"web-bff\"}" } ],
+  "notes": []
+}
+```
+
 **GET** `/orgs/:orgId/obs/logs` — 로그 Explorer [OBS-05] · `?from&to&filter&query&limit`
 ```json
 { "data": [ { "ts": "2026-08-23T00:00:00Z", "level": "error", "message": "upstream timeout", "labels": { "service": "api" } } ], "next": "cursor" }
 ```
+
+#### 인프라 (호스트 인벤토리 · hostmap · 업타임 SLO) — 2026-08-24 추가
+
+수집은 **OTel `hostmetrics` 리시버**가 담당한다(`services/observability/deploy/otel-hostmetrics.yaml`).
+호스트 에이전트는 다른 SDK와 **동일하게** `klaro-obs-key`로 인증해 게이트웨이로 OTLP를 보내므로,
+org 각인·쿼터 계량·VM 테넌트 라우팅이 전부 기존 수집 경로 그대로다. 게이트웨이 안에 스크레이프
+파이프라인을 두지 않는 이유는 그 파일 머리말에 적혀 있다(스크레이프에는 테넌트를 실어 줄 요청
+컨텍스트가 없다).
+
+**조인 키는 `host_ident`** = SDK가 정규화한 `service.instance.id`(에이전트는 `host.name`에서 파생)
+= remote write 익스포터가 시리즈에 붙이는 `instance` 라벨. 이 등식이 성립해야 Postgres의
+`observability_hosts`(레지스트리)와 VictoriaMetrics의 시계열이 같은 호스트로 이어진다. 조인은
+**애플리케이션에서** 수행한다 — 시계열은 RDB 밖(CLAUDE.md)이므로 SQL로 조인할 대상 자체가 없다.
+
+**GET** `/orgs/:orgId/obs/hosts` — 호스트 인벤토리 [OBS-01]
+```json
+{
+  "data": [ { "host_ident": "ip-10-0-1-14", "service": "checkout-api", "env": "prod",
+              "first_seen_at": "2026-08-21T09:00:00Z", "last_seen_at": "2026-08-24T12:44:30Z",
+              "status": "up", "cpu_pct": 73.4, "mem_pct": 41.2, "disk_pct": null, "load1": 1.8 } ],
+  "active_window_sec": 900, "total": 12, "active": 10, "metrics_available": true
+}
+```
+- `status`는 `up`/`stale`이고 **`down`이 아니다**. 이 플랫폼이 관측하는 것은 도달성이 아니라 보고이며,
+  에이전트가 멈춘 것을 호스트가 죽었다고 말하는 것은 측정하지 않은 것에 대한 주장이다.
+- 값이 `null`인 것은 0이 아니라 **"그 지표를 보고하지 않음"**이다(컨테이너 안 에이전트의 파일시스템 등).
+- `metrics_available: false`는 레지스트리는 읽혔지만 메트릭 백엔드에서 값을 못 가져온 부분 실패다 —
+  전체 실패가 아니라 게이지만 빈 화면으로 표시한다.
+- `active_window_sec`는 쿼터가 활성 호스트를 세는 창과 **같은 값**이다(화면과 청구서가 어긋나지 않게).
+
+**GET** `/orgs/:orgId/obs/hosts/:hostIdent/metrics` — 호스트 상세 시계열 · `?from&to&step`
+```json
+{ "host_ident": "ip-10-0-1-14",
+  "series": { "cpu_pct": { "labels": { "series": "cpu_pct" }, "points": [ [1756000000000, 73.4] ] },
+              "mem_pct": {}, "disk_pct": {}, "load1": {},
+              "net_rx_bps": {}, "net_tx_bps": {}, "disk_read_bps": {}, "disk_write_bps": {} },
+  "clamped": false, "from": "…", "to": "…", "queries": { "cpu_pct": "100 * (1 - avg (…))" } }
+```
+선언된 키는 백엔드에 데이터가 없어도 **항상 존재**한다(빈 `points`) — 패널이 조용히 사라지는 대신
+"보고하지 않음"을 말할 수 있어야 하기 때문이다. 롤업 폴백은 하지 않고 보존 창으로 자른다(`clamped`).
+
+**GET** `/orgs/:orgId/obs/slo/uptime` — 업타임/가용성 SLO · `?from&to&step&target&host`
+```json
+{ "target": 0.99, "step_sec": 60, "from": "…", "to": "…", "clamped": false,
+  "availability": 0.9972, "observed_buckets": 1437, "expected_buckets": 1441,
+  "hosts": [ { "host_ident": "ip-10-0-1-14", "observed_buckets": 1437,
+               "expected_buckets": 1441, "availability": 0.9972, "met": true } ],
+  "query": "count by (instance) (count_over_time(…))" }
+```
+- **가용률 = 보고 커버리지**다. 한 버킷 안에 호스트 메트릭 샘플이 하나라도 있으면 그 버킷은 up.
+  합성 체크도 별도 하트비트도 없으므로 다른 정의는 측정하지 않은 신호를 추론하는 것이 된다.
+- `expected_buckets`는 **요청 구간에서 유도**한다(응답에 온 버킷 수가 아니다). 하루 창에서 마지막
+  1시간만 보고한 호스트는 1/24이지 100%가 아니다.
+- 데이터가 없으면 `hosts: []`·`expected_buckets: 0`인 **빈 측정**을 돌려준다. 아무도 보고 있지 않은
+  플릿에 100%를 표시하는 것이 이 엔드포인트가 낼 수 있는 가장 위험한 숫자다.
+- `target`은 0<t≤1만 받는다. 99(퍼센트 의도)는 조용히 1로 클램프하지 않고 `422`다.
 
 **POST/GET/PATCH/DELETE** `/orgs/:orgId/obs/alert-rules` — 알림 룰 CRUD [OBS-06]
 ```json

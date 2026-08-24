@@ -5,21 +5,29 @@
  * 존재하므로 한쪽을 바꾸면 다른 쪽도 동기화해야 한다(CLAUDE.md 문서 지도).
  * 여기 새로 추가된 것은 상시 관측 전용 표면(리졸루션 배지·워터폴·로그 뷰·
  * 상태 카드)뿐이고, 그것들도 기존 토큰만 사용한다.
+ *
+ * 예외: 이 앱은 "다크 콕핏" 기본(2026-08 P1 파운데이션)을 채택해 :root 기본값
+ * 자체가 다크이고, --accent/--accent-soft를 콕핏 톤으로 조정했다(good/warn/
+ * crit 상태색은 원래 값 그대로). prototype.html은 여전히 라이트 기본 + 원래
+ * accent를 쓰는 다른 제품 표면(부하 테스트 SaaS)이라 의도적으로 갈라진다.
  */
 
-/* ============ 디자인 토큰 (prototype.html v1과 동일) ============ */
+/* uPlot 캔버스 차트(TimeSeriesChart)의 커서/축 뼈대 CSS. 색은 아래에서 토큰으로 덮어쓴다. */
+@import "uplot/dist/uPlot.min.css";
+
+/* ============ 디자인 토큰 — 다크 콕핏 기본 ============ */
 :root {
-  --bg: #F4F6FA; --surface: #FFFFFF; --surface-2: #ECF0F6;
-  --border: #DCE3EC; --border-strong: #C3CDDB;
-  --ink: #17202E; --ink-2: #46536B; --muted: #6B7A93;
-  --accent: #2F6FED; --accent-ink: #FFFFFF; --accent-soft: #E7EEFD;
-  --good: #12A150; --good-soft: #E2F5EA;
-  --warn: #C6820A; --warn-soft: #FBF1DC;
-  --crit: #D53A3F; --crit-soft: #FBE7E8;
-  --sev-high: #C05B14;
-  --s-p50: #0E9A92; --s-p95: #3B72E8; --s-p99: #8A5BD6;
-  --grid: #E4E9F1;
-  --shadow: 0 1px 2px rgba(23,32,46,.05), 0 4px 14px rgba(23,32,46,.06);
+  --bg: #0D1320; --surface: #151C2B; --surface-2: #1C2436;
+  --border: #273349; --border-strong: #35435E;
+  --ink: #E7EDF6; --ink-2: #AAB6CB; --muted: #7C89A3;
+  --accent: #5B8DFF; --accent-ink: #0D1320; --accent-soft: #182444;
+  --good: #3BC47E; --good-soft: #14301F;
+  --warn: #E5A93D; --warn-soft: #33270E;
+  --crit: #F26D71; --crit-soft: #3A1719;
+  --sev-high: #F0935A;
+  --s-p50: #2FC6BC; --s-p95: #6C8CFF; --s-p99: #B18AF2;
+  --grid: #202B40;
+  --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 14px rgba(0,0,0,.25);
   --radius: 10px;
   --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
@@ -28,29 +36,16 @@
   --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-6: 24px; --sp-8: 32px;
 }
 
-/* 테마 미지정(시스템 설정) — 다크 선호일 때만 뒤집는다. */
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg: #0D1320; --surface: #151C2B; --surface-2: #1C2436;
-    --border: #273349; --border-strong: #35435E;
-    --ink: #E7EDF6; --ink-2: #AAB6CB; --muted: #7C89A3;
-    --accent: #6C8CFF; --accent-ink: #0D1320; --accent-soft: #1E2A4A;
-    --good: #3BC47E; --good-soft: #14301F;
-    --warn: #E5A93D; --warn-soft: #33270E;
-    --crit: #F26D71; --crit-soft: #3A1719;
-    --sev-high: #F0935A;
-    --s-p50: #2FC6BC; --s-p95: #6C8CFF; --s-p99: #B18AF2;
-    --grid: #202B40;
-    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 14px rgba(0,0,0,.25);
-  }
-}
-
-/* 사용자가 명시적으로 고른 테마는 시스템 설정을 이긴다. */
+/*
+ * 다크가 기본이므로 시스템 라이트/다크 선호는 더 이상 기본값을 바꾸지 않는다
+ * (다크 우선: 라이트는 아래 토글로만 진입). 사용자가 명시적으로 고른 테마만
+ * :root 기본을 이긴다.
+ */
 :root[data-theme="dark"] {
   --bg: #0D1320; --surface: #151C2B; --surface-2: #1C2436;
   --border: #273349; --border-strong: #35435E;
   --ink: #E7EDF6; --ink-2: #AAB6CB; --muted: #7C89A3;
-  --accent: #6C8CFF; --accent-ink: #0D1320; --accent-soft: #1E2A4A;
+  --accent: #5B8DFF; --accent-ink: #0D1320; --accent-soft: #182444;
   --good: #3BC47E; --good-soft: #14301F;
   --warn: #E5A93D; --warn-soft: #33270E;
   --crit: #F26D71; --crit-soft: #3A1719;
@@ -251,6 +246,9 @@ textarea.input { resize: vertical; min-height: 62px; }
 .chart-tip .tip-ts { font-family: var(--mono); color: var(--muted); font-size: 11px; margin-bottom: var(--sp-1); }
 .chart-tip .tip-row { display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
+/* uPlot의 기본 크로스헤어는 하드코딩된 회색(#607D8B)이라 테마 토큰으로 덮어쓴다. */
+.chart-inner .u-cursor-x, .chart-inner .u-cursor-y { border-color: var(--border-strong) !important; }
+
 /* ============ 워터폴 (트레이스) ============ */
 .wf { display: flex; flex-direction: column; gap: 7px; margin-top: 10px; min-width: 520px; }
 .wf-row { display: grid; grid-template-columns: 240px 1fr 74px; align-items: center; gap: 10px; font-size: 12px; }
@@ -261,6 +259,32 @@ textarea.input { resize: vertical; min-height: 62px; }
 .wf-bar.hot { background: var(--crit); }
 .wf-ms { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; color: var(--muted); }
 .wf-ms.hot { color: var(--crit); font-weight: 700; }
+
+/* ============ 플레임그래프 · 오류 지점 (P1a 연계분석) ============ */
+/* 깊이=y, 시간=x. 스팬 수가 많아도 한 화면에 들어와야 하므로 행 높이를 조밀하게 둔다. */
+.flame { overflow-x: auto; margin-top: 10px; }
+.flame svg { display: block; }
+/* stroke가 surface 색인 이유: 인접한 같은 색 막대의 경계를 배경으로 갈라 보이게 한다. */
+.flame-rect { cursor: pointer; stroke: var(--surface); stroke-width: 1; transition: filter .12s ease, stroke .12s ease; }
+.flame-rect:hover { filter: brightness(1.15); }
+.flame-rect.is-selected { stroke: var(--ink); stroke-width: 1.6; filter: brightness(1.2); }
+/* 라벨은 채워진 막대 위에 얹히므로 배경색 계열(--bg)이 대비가 가장 크다. */
+.flame-label { font-family: var(--mono); font-size: 10px; fill: var(--bg); font-weight: 650; }
+.flame-foot { display: flex; flex-wrap: wrap; gap: var(--sp-2) 14px; align-items: baseline; margin-top: var(--sp-2); }
+.flame-legend { display: flex; flex-wrap: wrap; gap: var(--sp-1) 12px; margin-left: auto; font-size: 11px; color: var(--ink-2); }
+.flame-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.flame-legend .swatch { width: 10px; height: 10px; border-radius: 3px; }
+
+/* 워터폴 행도 선택 대상이 된다(플레임그래프와 같은 선택 상태를 공유). */
+.wf-row.is-selected { background: var(--accent-soft); border-radius: 4px; }
+.wf-row[tabindex] { cursor: pointer; }
+.wf-row[tabindex]:hover { background: var(--surface-2); border-radius: 4px; }
+.wf-row[tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.err-groups { display: flex; flex-direction: column; gap: 6px; }
+.err-group { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; cursor: pointer; background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--crit); border-radius: 8px; padding: 7px 11px; font-size: 12.5px; color: var(--ink); }
+.err-group:hover { background: var(--crit-soft); }
+.err-group.is-selected { background: var(--crit-soft); border-color: var(--crit); }
 
 /* ============ 로그 뷰 ============ */
 .log-view { font-family: var(--mono); font-size: 11.5px; border: 1px solid var(--border); border-radius: 8px; max-height: 520px; overflow: auto; background: var(--surface); }
@@ -317,9 +341,74 @@ textarea.input { resize: vertical; min-height: 62px; }
 .filter-op { border: 1px solid var(--border); background: var(--surface-2); border-radius: 7px; height: 32px; font-family: var(--mono); font-size: 12px; color: var(--ink-2); cursor: pointer; }
 .filter-op[aria-pressed="true"] { color: var(--crit); border-color: var(--crit); }
 
+/* ============ 인프라: 호스트맵 · 사용률 셀 · SLO (P1b) ============ */
+/*
+ * 호스트맵 셀은 SVG polygon이고 fill을 var(--token)으로 받는다. 색 자체를 여기서
+ * 정하지 않는 이유: 밴드(여유/정상/주의/높음/포화)는 컴포넌트의 판단이고 토큰은
+ * 테마의 판단이다. 여기 있는 건 상호작용 표현뿐이다.
+ */
+.hexcell { cursor: pointer; transition: filter .12s ease; }
+.hexcell:hover { filter: brightness(1.25); }
+.hexcell:focus-visible { outline: none; stroke: var(--ink); stroke-width: 2.5; }
+
+.hexlegend { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) 14px; margin-top: var(--sp-3); font-size: 11.5px; color: var(--ink-2); }
+.hexlegend span { display: inline-flex; align-items: center; gap: 6px; }
+.hexswatch { width: 11px; height: 11px; border-radius: 3px; display: inline-block; flex: none; }
+.hexswatch.is-empty { background: var(--surface-2); border: 1px dashed var(--border-strong); }
+
+/* 테이블 인라인 사용률: 막대 + 숫자. 막대만으론 부정확하고 숫자만으론 훑기 어렵다. */
+.usage { display: flex; align-items: center; gap: var(--sp-2); }
+.usage-bar { flex: 1; min-width: 56px; height: 6px; border-radius: 99px; background: var(--surface-2); overflow: hidden; }
+.usage-fill { display: block; height: 100%; border-radius: 99px; background: var(--muted); transition: width .3s ease; }
+.usage-fill.is-good { background: var(--good); }
+.usage-fill.is-accent { background: var(--accent); }
+.usage-fill.is-warn { background: var(--warn); }
+.usage-fill.is-crit { background: var(--crit); }
+.usage-num { font-size: 11.5px; color: var(--ink-2); flex: none; width: 46px; text-align: right; }
+
+.infra-kpis { grid-template-columns: repeat(3, 1fr); }
+
+.slo { display: flex; flex-direction: column; gap: var(--sp-3); }
+.slo-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-3); }
+.slo-value { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 28px; font-weight: 650; letter-spacing: -.02em; margin: 2px 0; }
+.slo-value.is-good { color: var(--good); }
+.slo-value.is-warn { color: var(--warn); }
+.slo-value.is-crit { color: var(--crit); }
+/* 막대가 보여주는 건 달성률이 아니라 소진된 오류 예산이다 — 99.9%와 100%는 눈으로 구분되지 않는다. */
+.slo-bar { height: 8px; border-radius: 99px; background: var(--surface-2); overflow: hidden; }
+.slo-fill { display: block; height: 100%; border-radius: 99px; background: var(--good); transition: width .3s ease; }
+.slo-fill.is-warn { background: var(--warn); }
+.slo-fill.is-crit { background: var(--crit); }
+.slo-foot { display: flex; justify-content: space-between; gap: var(--sp-2); font-size: 12px; color: var(--muted); }
+.slo-misses ul { list-style: none; margin: var(--sp-2) 0 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.slo-misses li { display: flex; justify-content: space-between; gap: var(--sp-2); font-size: 12px; }
+.slo-misses .mono { font-family: var(--mono); color: var(--ink-2); }
+
 /* ============ 대시보드 그리드 ============ */
 .dash-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; }
 .dash-panel { min-width: 0; }
+
+/*
+ * ============ 밀도·레이아웃 변형 (opt-in, P1 파운데이션) ============
+ * 기존 컴포넌트는 그대로 두고, 화면이 원할 때만 상위 컨테이너에 클래스를
+ * 얹어 켠다. P1a(플레임그래프)·P1b(hostmap)처럼 데이터 밀도가 높은 화면을
+ * 겨냥한 것으로, 나머지 화면은 지금 값 그대로 회귀 없이 유지된다.
+ */
+
+/* 풀블리드: .view의 1280px 상한을 걷어내고 뷰포트 폭을 그대로 쓴다. */
+.view.view-wide { max-width: none; }
+
+/* 컴팩트 밀도: 행 높이·패딩을 줄여 한 화면에 더 많은 행/타일을 담는다. */
+.density-compact .card { padding: 10px 14px; }
+.density-compact .card-head { margin-bottom: var(--sp-2); }
+.density-compact .kpi-grid { gap: 10px; }
+.density-compact .kpi { padding: 9px 11px 9px 15px; }
+.density-compact .kpi-value { font-size: 20px; }
+.density-compact .tbl th { padding: 5px 8px; }
+.density-compact .tbl td { padding: 5px 8px; }
+.density-compact .log-row { padding: 3px var(--sp-2); }
+.density-compact .wf { gap: 4px; }
+.density-compact .subtabs { margin: var(--sp-1) 0 10px; }
 
 /* ============ 반응형 ============ */
 @media (max-width: 900px) {
@@ -328,7 +417,8 @@ textarea.input { resize: vertical; min-height: 62px; }
   .side-group { display: none; }
   .nav-btn { width: auto; white-space: nowrap; }
   main { padding: var(--sp-4) 14px 48px; }
-  .kpi-grid { grid-template-columns: 1fr 1fr; }
+  .kpi-grid, .infra-kpis { grid-template-columns: 1fr 1fr; }
+  .usage-bar { min-width: 40px; }
   .grid-2, .grid-32, .kv-form { grid-template-columns: 1fr; }
   .log-row { grid-template-columns: 108px 52px 1fr; }
   .wf-row { grid-template-columns: 130px 1fr 62px; }

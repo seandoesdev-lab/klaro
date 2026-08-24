@@ -17,7 +17,12 @@ import { config } from "@/lib/config";
 import { useLive } from "@/hooks/useLive";
 
 const THEME_KEY = "klaro-obs-theme";
-type Theme = "light" | "dark" | "system";
+/**
+ * Dark-first: "dark" is the unconditional default, not a stand-in for "follow
+ * the OS". There is no "system" state - globals.css no longer reacts to
+ * prefers-color-scheme, so the only way to reach light is this toggle.
+ */
+type Theme = "light" | "dark";
 
 function BrandMark() {
   return (
@@ -35,6 +40,29 @@ interface NavItem {
   label: string;
   icon: ReactNode;
 }
+
+/**
+ * Infrastructure sits in its own group above the signal explorers.
+ *
+ * It is not a fourth signal - it is the fleet those signals arrive from, and
+ * the question it answers ("which machine") comes before the question the
+ * explorers answer ("what happened"). Filing it under 탐색 would have put a
+ * noun among three verbs.
+ */
+const INFRA_NAV: NavItem[] = [
+  {
+    href: "/infrastructure",
+    label: "인프라",
+    icon: (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+        strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <rect x="3" y="4" width="18" height="6" rx="1.5" />
+        <rect x="3" y="14" width="18" height="6" rx="1.5" />
+        <path d="M7 7h.01M7 17h.01" />
+      </svg>
+    ),
+  },
+];
 
 const EXPLORER_NAV: NavItem[] = [
   {
@@ -164,23 +192,26 @@ function LiveChip() {
 }
 
 function ThemeToggle() {
-  const [theme, setTheme] = useState<Theme>("system");
+  const [theme, setTheme] = useState<Theme>("dark");
 
   // Read the stored choice after mount: the server render cannot know it, and
   // reading it during render would produce a hydration mismatch.
   useEffect(() => {
     const stored = window.localStorage.getItem(THEME_KEY);
-    if (stored === "light" || stored === "dark") setTheme(stored);
+    if (stored === "light") setTheme("light");
   }, []);
 
   useEffect(() => {
     const root = document.documentElement;
-    if (theme === "system") {
+    if (theme === "dark") {
+      // No attribute needed: :root's own defaults are already dark. Clearing
+      // it (and the stored choice) is what makes "dark" the true default
+      // rather than just another explicit option.
       root.removeAttribute("data-theme");
       window.localStorage.removeItem(THEME_KEY);
     } else {
-      root.setAttribute("data-theme", theme);
-      window.localStorage.setItem(THEME_KEY, theme);
+      root.setAttribute("data-theme", "light");
+      window.localStorage.setItem(THEME_KEY, "light");
     }
   }, [theme]);
 
@@ -234,6 +265,8 @@ export function AppShell({ children }: { children: ReactNode }) {
 
       <div className="app">
         <nav className="sidebar" aria-label="상시 관측 메뉴">
+          <p className="microlabel side-group">인프라</p>
+          <NavList items={INFRA_NAV} pathname={pathname} />
           <p className="microlabel side-group">탐색</p>
           <NavList items={EXPLORER_NAV} pathname={pathname} />
           <p className="microlabel side-group">운영</p>

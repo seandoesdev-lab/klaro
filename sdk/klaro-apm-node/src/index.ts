@@ -24,6 +24,13 @@ export {
   type KlaroConfig,
   type KlaroConfigOverrides,
 } from './config';
+export {
+  SPAN_ID_KEY,
+  TRACE_ID_KEY,
+  correlationFields,
+  withCorrelation,
+  type CorrelationFields,
+} from './correlation';
 export { detectPodUid, resolveHostIdent } from './hostIdent';
 export {
   buildChannelCredentials,

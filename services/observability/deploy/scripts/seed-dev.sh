@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Seed the local observability stack for the dashboard and print the credentials.
 #
-# It does the three things that are otherwise easy to get subtly wrong by hand:
+# It does the four things that are otherwise easy to get subtly wrong by hand:
 #
 #   1. seeds the org row. The dashboard's org is not seeded by a migration -
 #      migrations own the schema, not a tenant - so without this every request
@@ -13,6 +13,9 @@
 #   3. issues an ingest key, so telemetry can actually be pushed in. A
 #      dashboard connected to an empty backend is indistinguishable from a
 #      broken one.
+#   4. recreates the host metrics agent with that key. It authenticates like any
+#      other SDK, so a container started before the key existed is holding an
+#      empty credential and the infrastructure screen stays empty.
 #
 # Re-running is safe. The org row is upserted, a fresh token is minted, and a
 # fresh ingest key is issued while the keys a previous run left active are
@@ -104,6 +107,17 @@ if [ "$ISSUE_KEY" = "1" ]; then
   KEY="$(printf '%s' "$KEY_JSON" | node -e \
     'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).secret??""))')"
   [ -n "$KEY" ] || { echo "seed-dev: no secret in key response: $KEY_JSON" >&2; exit 1; }
+
+  # The host metrics agent authenticates with an ingest key exactly like an SDK
+  # does, so it has to be recreated with the key this run issued: a container
+  # started before the key existed is holding an empty credential and is being
+  # 401'd by the gateway on every flush. Recreating it here is what makes
+  # "run seed-dev, look at the infrastructure screen" actually show hosts.
+  if "${COMPOSE[@]}" ps --services 2>/dev/null | grep -qx otel-hostagent; then
+    log "recreating otel-hostagent with the new ingest key"
+    KLARO_OBS_KEY="$KEY" "${COMPOSE[@]}" up -d --force-recreate otel-hostagent >/dev/null 2>&1 ||
+      log "note: otel-hostagent could not be restarted; host metrics will stay empty"
+  fi
 fi
 
 # --- 4. the dashboard's environment ----------------------------------------
