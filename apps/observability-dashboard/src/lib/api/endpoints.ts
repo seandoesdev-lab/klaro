@@ -15,6 +15,7 @@ import type {
   AlertEventFilter,
   AlertRule,
   AlertRuleInput,
+  CorrelatedTrace,
   Dashboard,
   DashboardInput,
   ListEnvelope,
@@ -126,6 +127,42 @@ export async function searchTraces(args: TracesArgs): Promise<TracesResult> {
 export async function getTrace(traceId: string, signal?: AbortSignal): Promise<Trace> {
   if (config.mock) return mock.delay(mock.mockTrace(traceId));
   return request<Trace>("/obs/traces/" + encodeURIComponent(traceId), { signal });
+}
+
+export interface CorrelatedArgs {
+  /** Widens the window around the trace, in seconds. obsplane caps this. */
+  padSec?: number;
+  logLimit?: number;
+  /** Metric names; empty means obsplane picks its default correlation set. */
+  metrics?: string[];
+  stepSec?: number;
+  signal?: AbortSignal;
+}
+
+/**
+ * One trace joined to its logs and its services metrics.
+ *
+ * A single call rather than three: the window, the service list and the host
+ * list are all derived from the spans server side, so a client that assembled
+ * this itself would have to re-derive them - and would get a different answer
+ * whenever a span arrived late.
+ */
+export async function getCorrelated(
+  traceId: string,
+  args: CorrelatedArgs = {},
+): Promise<CorrelatedTrace> {
+  if (config.mock) return mock.delay(mock.mockCorrelated(traceId));
+
+  const params = new URLSearchParams();
+  if (args.padSec && args.padSec > 0) params.set("pad_sec", String(args.padSec));
+  if (args.logLimit && args.logLimit > 0) params.set("log_limit", String(args.logLimit));
+  if (args.stepSec && args.stepSec > 0) params.set("step", String(args.stepSec));
+  for (const m of args.metrics ?? []) params.append("metric", m);
+
+  return request<CorrelatedTrace>(
+    "/obs/traces/" + encodeURIComponent(traceId) + "/correlated",
+    { params, signal: args.signal },
+  );
 }
 
 /* ----------------------------------------------------------------- logs -- */

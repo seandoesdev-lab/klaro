@@ -48,7 +48,7 @@ cd apps/observability-dashboard && npm run dev     # http://localhost:3100/live
 | `/live` | 라이브 대시보드 (KPI ≤2초 갱신) | WS `/obs/live`, `/obs/quota` | OBS-01, APM-02 |
 | `/metrics` | 메트릭 Explorer (라인차트 + 해상도 배지) | `/obs/metrics/query` | OBS-03 |
 | `/traces` | 트레이스 목록 | `/obs/traces` | OBS-04 |
-| `/traces/[traceId]` | 스팬 워터폴 | `/obs/traces/:id` | OBS-04, APM-03 |
+| `/traces/[traceId]` | 트레이스 연계 분석(플레임그래프/워터폴 + 스팬별 로그·메트릭 탭) | `/obs/traces/:id/correlated` | OBS-04, APM-03 |
 | `/logs` | 로그 Explorer | `/obs/logs` | OBS-05 |
 | `/alerts` | 알림 룰 CRUD + 이벤트 목록 | `/obs/alert-rules`, `/obs/alert-events` | OBS-06, OBS-07 |
 | `/dashboards`, `/dashboards/[dashId]` | 대시보드 목록·조회·최소 편집 | `/obs/dashboards` | OBS-09 |

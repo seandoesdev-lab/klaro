@@ -173,6 +173,7 @@ DDL과 `CREATE ROLE`은 앱 롤 권한 밖이므로 **마이그레이션은 별�
 | GET | `/orgs/:orgId/obs/metrics/query` | `metric` · `filter`(반복/콤마) · `agg` · `step`(초) · `from`/`to` |
 | GET | `/orgs/:orgId/obs/traces` | `service` · `min_duration_ms` · `limit` · `from`/`to` |
 | GET | `/orgs/:orgId/obs/traces/:traceId` | — (span 워터폴) |
+| GET | `/orgs/:orgId/obs/traces/:traceId/correlated` | `pad_sec`(≤900) · `log_limit` · `step` · `metric`(반복) — 스팬 + 그 trace_id의 로그 + 서비스/호스트 메트릭 |
 | GET | `/orgs/:orgId/obs/logs` | `filter` · `query`(리터럴 부분문자열) · `limit` · `from`/`to` |
 
 `from`/`to`는 RFC3339 · unix 초 · unix 밀리초를 모두 받고, 없으면 최근 1시간이다.

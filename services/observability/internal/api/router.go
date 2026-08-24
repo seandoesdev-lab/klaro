@@ -131,6 +131,11 @@ func NewRouter(d Deps) *gin.Engine {
 		read.GET("/obs/metrics/query", d.getMetrics)
 		read.GET("/obs/traces", d.getTraces)
 		read.GET("/obs/traces/:traceId", d.getTrace)
+		// Cross-signal correlation for one trace: its spans, the log lines
+		// written inside it, and the metrics of the services and hosts it
+		// touched [APM-03]. It reads three backends at once, so it sits behind
+		// the same read gate rather than being given a looser one.
+		read.GET("/obs/traces/:traceId/correlated", d.getCorrelated)
 		read.GET("/obs/logs", d.getLogs)
 
 		// Alert rules and the history of what they fired [OBS-06/07].

@@ -100,6 +100,8 @@ export interface Span {
   start: number;
   duration_ms: number;
   status: string;
+  /** The resource service.instance.id: this span join key for metrics. */
+  host?: string;
 }
 
 /** internal/explorer.Trace */
@@ -114,6 +116,9 @@ export interface LogEntry {
   ts: number;
   level: string;
   message: string;
+  /** Correlation keys, promoted out of Loki structured metadata. */
+  trace_id?: string;
+  span_id?: string;
   labels: Record<string, string>;
 }
 
@@ -122,6 +127,55 @@ export interface LogsPage {
   data: LogEntry[];
   next?: string;
   query: string;
+}
+
+/* ---------------------------------------------------------- correlation -- */
+
+/**
+ * internal/explorer.CorrelationScope - one service+host pair the trace touched.
+ *
+ * Returned so the metric list is explainable: these series were chosen because
+ * this instance held the span that took most of the time.
+ */
+export interface CorrelationScope {
+  service: string;
+  host?: string;
+  spans: number;
+  /** Summed span duration, not wall clock: concurrent siblings both count. */
+  duration_ms: number;
+  errors: number;
+}
+
+/** internal/explorer.CorrelatedMetric */
+export interface CorrelatedMetric {
+  /** Unique within a response; safe to use as a React key. */
+  key: string;
+  metric: string;
+  service: string;
+  host?: string;
+  series: Series[];
+  resolution: Resolution;
+  query: string;
+}
+
+/**
+ * internal/explorer.Correlated - one trace joined to its logs and metrics.
+ *
+ * `notes` is not decoration. A signal obsplane could not read comes back as an
+ * empty list plus a note, so a view that ignores notes shows "nothing was
+ * logged" when the truth is "the logs backend is down".
+ */
+export interface CorrelatedTrace {
+  trace_id: string;
+  spans: Span[];
+  /** The padded window the logs and metrics were read over (RFC3339). */
+  from: string;
+  to: string;
+  scopes: CorrelationScope[];
+  logs: LogEntry[];
+  logs_query?: string;
+  metrics: CorrelatedMetric[];
+  notes?: string[];
 }
 
 /* ------------------------------------------------------------- alerting -- */

@@ -303,7 +303,7 @@ Header: X-Report-Password: s3cret
 
 | 게이트 | 최소 역할 | 대상 |
 |--------|----------|------|
-| 조회 | `member` | `GET /obs/tenant` · `GET /obs/keys` · `GET /obs/quota` · Explorer(`metrics/query`·`traces`·`traces/:traceId`·`logs`) · `GET /obs/alert-rules[/:ruleId]` · `GET /obs/alert-events` · `GET /obs/dashboards[/:dashId]` · `GET /obs/live`(WS) |
+| 조회 | `member` | `GET /obs/tenant` · `GET /obs/keys` · `GET /obs/quota` · Explorer(`metrics/query`·`traces`·`traces/:traceId`·`traces/:traceId/correlated`·`logs`) · `GET /obs/alert-rules[/:ruleId]` · `GET /obs/alert-events` · `GET /obs/dashboards[/:dashId]` · `GET /obs/live`(WS) |
 | 변경 | `admin` | `POST/DELETE /obs/keys[/:keyId[/rotate]]` · `POST/PATCH/DELETE /obs/alert-rules[/:ruleId]` · `POST/PATCH/DELETE /obs/dashboards[/:dashId]` |
 
 조회 하한이 `viewer`가 아니라 `member`인 것은 의도다: 이 평면은 테넌트의 관측 이력 전체를 노출하므로 열람이 최저 권한일 수 없다. `viewer`는 klaro 전체 RBAC의 역할이고 상시 관측 평면에서는 아직 부여가 없다.
@@ -339,6 +339,34 @@ Header: X-Report-Password: s3cret
 **GET** `/orgs/:orgId/obs/traces/:traceId` → span 워터폴
 ```json
 { "trace_id": "abc", "spans": [ { "span_id": "s1", "parent_span_id": null, "service": "api-gateway", "name": "GET /orders", "duration_ms": 3480, "status": "ok" }, { "span_id": "s2", "parent_span_id": "s1", "service": "orders-svc", "name": "SELECT …", "duration_ms": 3200, "status": "ok" } ] }
+```
+
+**GET** `/orgs/:orgId/obs/traces/:traceId/correlated` — 크로스시그널 연계분석 [OBS-03/04/05, APM-03]
+`?pad_sec&log_limit&step&metric`(metric 반복 가능, 생략 시 서버 기본 세트)
+
+하나의 트레이스를 **그 안에서 쓰인 로그**와 **그 서비스·호스트의 메트릭**에 조인해 한 번에 반환한다. 조인 키는 방향마다 다르고, 그 차이를 응답이 숨기지 않는다:
+
+- **트레이스→로그는 정확**하다. `trace_id`(+`span_id`)가 로그 레코드에 실려 있고(상관키 규약 `sdk/SDK_CONTRACT.md §12`), 서버가 `{klaro_org_id="<org>"} | trace_id = "<hex>"` 형태의 LogQL을 만든다. `trace_id`는 **스트림 라벨이 아니라 structured metadata의 label filter**다 — 요청마다 값이 달라 라벨로 색인하면 요청당 스트림 하나가 만들어진다.
+- **트레이스→메트릭은 근사**다. 메트릭 시리즈에는 trace_id가 존재할 수 없으므로(카운터는 요청 단위가 아니다) `service_name`+`service_instance_id`로만 조인한다. 어느 범위에서 온 시리즈인지 `scopes`/`metrics[].service|host`로 드러내, 근사임이 보이게 한다.
+
+**org 강제**: 트레이스를 먼저 읽고(Tempo `X-Scope-OrgID`) 그 결과로 창(window)과 범위를 만든다. 다른 org의 trace_id는 이 시점에서 404이고, 로그·메트릭 질의는 아예 만들어지지 않는다. 세 백엔드 모두 매퍼가 준 테넌트(VM AccountID 경로 세그먼트, Tempo/Loki 헤더) + 주입된 `klaro_org_id` 매처를 쓴다.
+
+**부분 실패는 부분 응답**: 트레이스 읽기 실패만 치명적(404/502)이고, 로그·메트릭은 best effort다. 읽지 못한 신호는 빈 배열 + `notes` 항목으로 온다 — 빈 배열만 주면 "조용했다"로 읽히기 때문이다. `notes`는 업스트림 응답 본문을 절대 그대로 담지 않는다(다른 테넌트의 라벨·내부 호스트명이 섞일 수 있다).
+
+**한도**: `pad_sec` ≤ 900(기본 30), 메트릭 팬아웃은 scope 4개 × 질의 12개까지이며 잘렸으면 `notes`에 적는다.
+
+```json
+{
+  "trace_id": "5b8efff798038103d269b633813fc60c",
+  "spans": [ { "span_id": "aaaa", "parent_span_id": null, "service": "web-bff", "host": "pod:aaaa1111", "start": 1756000000000, "duration_ms": 4000, "status": "unset" } ],
+  "from": "2026-08-23T23:59:30Z",
+  "to": "2026-08-24T00:00:34Z",
+  "scopes": [ { "service": "web-bff", "host": "pod:aaaa1111", "spans": 1, "duration_ms": 4000, "errors": 0 } ],
+  "logs": [ { "ts": 1756000003000, "level": "ERROR", "message": "psp timeout after 3000ms", "trace_id": "5b8e…", "span_id": "bbbb", "labels": { "service_name": "payments" } } ],
+  "logs_query": "{klaro_org_id=\"…\"} | trace_id = \"5b8e…\"",
+  "metrics": [ { "key": "process_cpu_utilization@web-bff/pod:aaaa1111", "metric": "process_cpu_utilization", "service": "web-bff", "host": "pod:aaaa1111", "series": [ { "labels": { "service_name": "web-bff" }, "points": [ [1756000000000, 0.81] ] } ], "resolution": "raw", "query": "process_cpu_utilization{klaro_org_id=\"…\",service_instance_id=\"pod:aaaa1111\",service_name=\"web-bff\"}" } ],
+  "notes": []
+}
 ```
 
 **GET** `/orgs/:orgId/obs/logs` — 로그 Explorer [OBS-05] · `?from&to&filter&query&limit`
