@@ -11,12 +11,23 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@visx/group": "^4.0.0",
+    "@visx/hierarchy": "^4.0.0",
+    "@visx/responsive": "^4.0.0",
+    "@visx/scale": "^4.0.0",
+    "@visx/shape": "^4.0.0",
+    "@visx/tooltip": "^4.0.0",
+    "d3-hierarchy": "^3.1.2",
+    "d3-scale": "^4.0.2",
     "next": "15.5.23",
     "react": "19.1.1",
     "react-dom": "19.1.1",
-    "recharts": "3.2.1"
+    "recharts": "3.2.1",
+    "uplot": "^1.6.32"
   },
   "devDependencies": {
+    "@types/d3-hierarchy": "^3.1.7",
+    "@types/d3-scale": "^4.0.9",
     "@types/node": "22.15.3",
     "@types/react": "19.1.9",
     "@types/react-dom": "19.1.7",

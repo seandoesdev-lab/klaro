@@ -275,7 +275,7 @@ UX 포인트
 - 리포트 화면은 [`/reports/:id`](./03-api-spec.md) 응답의 `performance_score·security_score·ai_summary`에 매핑.
 - 보안 findings 필터/무시는 [`PATCH /scans/:id/findings/:id`](./03-api-spec.md)와 `finding_hash` 기준 상태 유지([데이터 모델 §2.4](./02-data-model.md)).
 - 사용량 슬라이더 미리보기는 [`/orgs/:orgId/usage`](./03-api-spec.md)·플랜 한도로 계산.
-- 차트 라이브러리: **Recharts/visx**([기술 스택](./00-tech-stack.md)). 색 토큰은 §5·§6 기준으로 테마 변수화.
+- 차트 라이브러리: **Recharts/visx**([기술 스택](./00-tech-stack.md)). 색 토큰은 §5·§6 기준으로 테마 변수화. *(2026-08-24: `apps/observability-dashboard`는 고밀도 시계열을 캔버스로 그리는 **uPlot**으로 전환, 커스텀 시각화는 **visx/d3** 유지 — 상시 관측 대시보드 P1 파운데이션.)*
 
 ---
 

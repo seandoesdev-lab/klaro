@@ -8,14 +8,15 @@ export const metadata: Metadata = {
 };
 
 /**
- * The theme has to be applied before first paint or the page flashes light on
- * a dark-themed browser. That means an inline script: any React effect runs
- * after hydration, which is several frames too late.
+ * Dark is the CSS default now, so the only flash to prevent is dark-then-light
+ * for a visitor who previously chose light. That means an inline script: any
+ * React effect runs after hydration, which is several frames too late.
  */
 const THEME_BOOTSTRAP = `
 try {
-  var t = localStorage.getItem("klaro-obs-theme");
-  if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+  if (localStorage.getItem("klaro-obs-theme") === "light") {
+    document.documentElement.setAttribute("data-theme", "light");
+  }
 } catch (e) {}
 `;
 
