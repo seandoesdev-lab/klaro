@@ -19,6 +19,7 @@ import (
 	"github.com/klaro/observability/internal/dashboards"
 	"github.com/klaro/observability/internal/explorer"
 	"github.com/klaro/observability/internal/ingestkey"
+	"github.com/klaro/observability/internal/inventory"
 	"github.com/klaro/observability/internal/live"
 	"github.com/klaro/observability/internal/platform/audit"
 	"github.com/klaro/observability/internal/platform/db"
@@ -42,6 +43,10 @@ type Deps struct {
 	Rules      *alerting.Store
 	RuleSync   *alerting.Syncer
 	Dashboards *dashboards.Store
+	// Inventory answers the infrastructure screen. It is an interface rather
+	// than *inventory.Service so a routing test can stand one up without a
+	// database - the org guard has to be provable without one.
+	Inventory HostInventory
 
 	// DevCORSOrigins are the browser origins allowed to call this API
 	// cross-origin. Empty mounts no CORS middleware; the production profile
@@ -54,6 +59,15 @@ type Deps struct {
 	// ActiveHostWindow is how recently a host must have reported to count
 	// against the host quota.
 	ActiveHostWindow time.Duration
+}
+
+// HostInventory is the host list behind the infrastructure screen (P1b).
+//
+// It is declared here, next to its only consumer, rather than in the inventory
+// package: the interface exists for this router's benefit, and defining it at
+// the point of use is what lets the concrete service stay unaware of it.
+type HostInventory interface {
+	List(ctx context.Context, orgID string) (inventory.Result, error)
 }
 
 // NewRouter builds the public engine.
@@ -132,6 +146,13 @@ func NewRouter(d Deps) *gin.Engine {
 		read.GET("/obs/traces", d.getTraces)
 		read.GET("/obs/traces/:traceId", d.getTrace)
 		read.GET("/obs/logs", d.getLogs)
+
+		// Infrastructure: the host fleet, one host's detail charts, and the
+		// uptime SLO measured over them (P1b). Reads only - a host appears
+		// here because it reported, never because someone declared it.
+		read.GET("/obs/hosts", d.listHosts)
+		read.GET("/obs/hosts/:hostIdent/metrics", d.getHostSeries)
+		read.GET("/obs/slo/uptime", d.getUptime)
 
 		// Alert rules and the history of what they fired [OBS-06/07].
 		write.POST("/obs/alert-rules", d.postAlertRule)

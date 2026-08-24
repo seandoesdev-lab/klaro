@@ -293,6 +293,96 @@ export interface Quota {
   overage: boolean;
 }
 
+/* --------------------------------------------------- infrastructure -- */
+
+/**
+ * internal/explorer.HostVitals.
+ *
+ * Every reading is nullable because the Go side made it a pointer: null is
+ * "this host reports no such metric", which is a different fact from 0 and has
+ * to stay different all the way to the cell that renders it.
+ */
+export interface HostVitals {
+  cpu_pct: number | null;
+  mem_pct: number | null;
+  disk_pct: number | null;
+  load1: number | null;
+}
+
+/**
+ * internal/inventory.Host - a registry row with its latest readings.
+ *
+ * status is "stale", never "down": the platform observes reporting, not
+ * reachability (inventory.StatusStale says why).
+ */
+export interface Host extends HostVitals {
+  host_ident: string;
+  service?: string;
+  env?: string;
+  first_seen_at: string;
+  last_seen_at: string;
+  status: "up" | "stale";
+}
+
+/** internal/inventory.Result */
+export interface HostsResult {
+  data: Host[];
+  active_window_sec: number;
+  total: number;
+  active: number;
+  /** False when the readings could not be fetched; the registry half still is. */
+  metrics_available: boolean;
+}
+
+/** internal/explorer.HostSeriesKeys, in display order. */
+export const HOST_SERIES_KEYS = [
+  "cpu_pct",
+  "mem_pct",
+  "disk_pct",
+  "load1",
+  "net_rx_bps",
+  "net_tx_bps",
+  "disk_read_bps",
+  "disk_write_bps",
+] as const;
+export type HostSeriesKey = (typeof HOST_SERIES_KEYS)[number];
+
+/** internal/explorer.HostSeriesResult */
+export interface HostSeriesResult {
+  host_ident: string;
+  series: Partial<Record<HostSeriesKey, Series>>;
+  clamped: boolean;
+  from: string;
+  to: string;
+  /** The MetricsQL obsplane generated per series, returned read-only. */
+  queries: Partial<Record<HostSeriesKey, string>>;
+}
+
+/** internal/explorer.UptimeHost */
+export interface UptimeHost {
+  host_ident: string;
+  observed_buckets: number;
+  expected_buckets: number;
+  /** 0..1, observed over expected. */
+  availability: number;
+  met: boolean;
+}
+
+/** internal/explorer.UptimeResult */
+export interface UptimeResult {
+  /** 0..1 objective the achievement is measured against. */
+  target: number;
+  step_sec: number;
+  from: string;
+  to: string;
+  clamped: boolean;
+  hosts: UptimeHost[];
+  availability: number;
+  observed_buckets: number;
+  expected_buckets: number;
+  query: string;
+}
+
 /** Envelope obsplane uses for every list endpoint. */
 export interface ListEnvelope<T> {
   data: T[];

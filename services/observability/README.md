@@ -175,6 +175,30 @@ DDL과 `CREATE ROLE`은 앱 롤 권한 밖이므로 **마이그레이션은 별�
 | GET | `/orgs/:orgId/obs/traces/:traceId` | — (span 워터폴) |
 | GET | `/orgs/:orgId/obs/logs` | `filter` · `query`(리터럴 부분문자열) · `limit` · `from`/`to` |
 
+## 인프라 (호스트 인벤토리 · hostmap · 업타임 SLO)
+
+| 메서드 | 경로 | 파라미터 |
+|---|---|---|
+| GET | `/orgs/:orgId/obs/hosts` | — (레지스트리 + 최신 cpu/mem/disk/load) |
+| GET | `/orgs/:orgId/obs/hosts/:hostIdent/metrics` | `step`(초) · `from`/`to` |
+| GET | `/orgs/:orgId/obs/slo/uptime` | `step`(초) · `target`(0<t≤1) · `host` · `from`/`to` |
+
+수집은 `deploy/otel-hostmetrics.yaml`의 **hostmetrics 리시버**다. 별도 에이전트 컨테이너
+(`otel-hostagent`)가 다른 SDK와 **똑같이** `klaro-obs-key`로 게이트웨이에 OTLP를 보내므로,
+org 각인·쿼터 계량·VM 테넌트 라우팅이 전부 기존 경로 그대로다. 게이트웨이 안에 스크레이프
+파이프라인을 두지 않는 이유는 그 파일 머리말에 있다 — 스크레이프에는 테넌트를 실어 줄 요청
+컨텍스트가 없고, 고정 org를 각인하는 우회로를 뚫는 것은 "테넌트는 CP가 준 값뿐"이라는
+불변식을 깨는 일이다.
+
+조인 키는 `host_ident`(= `service.instance.id` = 시리즈의 `instance` 라벨) 하나뿐이고,
+조인은 애플리케이션(`internal/inventory`)에서 한다 — 시계열은 RDB 밖이므로 SQL로 조인할
+대상이 없다. 레지스트리에는 있는데 시계열이 없는 호스트는 **행이 남고 값만 null**이다:
+보고가 끊긴 호스트가 화면에서 사라지는 것은, 사람이 그것을 알아채야 할 바로 그 순간에
+사라지는 것이다.
+
+업타임 SLO의 가용률은 **보고 커버리지**다(도달성이 아니다). 분모는 응답에 온 버킷 수가
+아니라 요청 구간에서 유도하며, 데이터가 없으면 100%가 아니라 빈 측정을 돌려준다.
+
 `from`/`to`는 RFC3339 · unix 초 · unix 밀리초를 모두 받고, 없으면 최근 1시간이다.
 
 **raw 쿼리는 받지 않는다.** MetricsQL/TraceQL/LogQL은 전부 서버가 조립하고, org는

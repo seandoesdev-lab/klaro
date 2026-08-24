@@ -45,6 +45,7 @@ cd apps/observability-dashboard && npm run dev     # http://localhost:3100/live
 
 | 경로 | 화면 | 소비 API | 요구사항 |
 |------|------|----------|----------|
+| `/infrastructure` | 인프라 (호스트 테이블 + visx 육각 hostmap + 호스트 상세 + 업타임 SLO) | `/obs/hosts`, `/obs/hosts/:id/metrics`, `/obs/slo/uptime` | OBS-01 |
 | `/live` | 라이브 대시보드 (KPI ≤2초 갱신) | WS `/obs/live`, `/obs/quota` | OBS-01, APM-02 |
 | `/metrics` | 메트릭 Explorer (라인차트 + 해상도 배지) | `/obs/metrics/query` | OBS-03 |
 | `/traces` | 트레이스 목록 | `/obs/traces` | OBS-04 |

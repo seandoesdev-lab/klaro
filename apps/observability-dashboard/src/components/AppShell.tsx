@@ -41,6 +41,29 @@ interface NavItem {
   icon: ReactNode;
 }
 
+/**
+ * Infrastructure sits in its own group above the signal explorers.
+ *
+ * It is not a fourth signal - it is the fleet those signals arrive from, and
+ * the question it answers ("which machine") comes before the question the
+ * explorers answer ("what happened"). Filing it under 탐색 would have put a
+ * noun among three verbs.
+ */
+const INFRA_NAV: NavItem[] = [
+  {
+    href: "/infrastructure",
+    label: "인프라",
+    icon: (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+        strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <rect x="3" y="4" width="18" height="6" rx="1.5" />
+        <rect x="3" y="14" width="18" height="6" rx="1.5" />
+        <path d="M7 7h.01M7 17h.01" />
+      </svg>
+    ),
+  },
+];
+
 const EXPLORER_NAV: NavItem[] = [
   {
     href: "/live",
@@ -242,6 +265,8 @@ export function AppShell({ children }: { children: ReactNode }) {
 
       <div className="app">
         <nav className="sidebar" aria-label="상시 관측 메뉴">
+          <p className="microlabel side-group">인프라</p>
+          <NavList items={INFRA_NAV} pathname={pathname} />
           <p className="microlabel side-group">탐색</p>
           <NavList items={EXPLORER_NAV} pathname={pathname} />
           <p className="microlabel side-group">운영</p>

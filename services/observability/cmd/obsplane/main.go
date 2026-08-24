@@ -37,6 +37,7 @@ import (
 	"github.com/klaro/observability/internal/dashboards"
 	"github.com/klaro/observability/internal/explorer"
 	"github.com/klaro/observability/internal/ingestkey"
+	"github.com/klaro/observability/internal/inventory"
 	"github.com/klaro/observability/internal/live"
 	"github.com/klaro/observability/internal/plans"
 	"github.com/klaro/observability/internal/platform/audit"
@@ -134,6 +135,13 @@ func run() error {
 		}, nil
 	})
 
+	// The infrastructure screen joins the host registry with readings taken
+	// back out of VictoriaMetrics through the Explorer, so it inherits the same
+	// tenant pinning and retention clamp as every other read. It is handed the
+	// quota's active-host window rather than its own, so what the screen calls
+	// an active host is what the invoice counts.
+	hosts := inventory.New(database, explore, cfg.ActiveHostWindow)
+
 	rules := alerting.NewStore(database)
 	ruleSync := alerting.NewSyncer(rules, planStore, tenantMapper, alerting.SyncerOptions{
 		Path:      cfg.RuleFile,
@@ -168,6 +176,7 @@ func run() error {
 			Rules:            rules,
 			RuleSync:         ruleSync,
 			Dashboards:       dashboardStore,
+			Inventory:        hosts,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
