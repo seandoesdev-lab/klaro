@@ -48,14 +48,14 @@ const (
 	MetricDiskIO = "system_disk_io_bytes_total"
 )
 
-// HostLabel is the label a host series is grouped by.
+// HostMetricLabel is the label a host series is grouped by.
 //
 // The remote write exporter sets `instance` from service.instance.id, which is
 // the same normalised identity the gateway reports to the control plane as
 // observability_hosts.host_ident (design HOW-4). That agreement is what lets
 // the registry row and the time series be joined at all, so the agent config
 // derives service.instance.id from host.name and this reads it back.
-const HostLabel = "instance"
+const HostMetricLabel = "instance"
 
 // stateLabel names the sub-dimension a utilisation ratio breaks down by.
 const stateLabel = "state"
@@ -98,7 +98,7 @@ func pct(v float64) float64 {
 
 // vitalsQueries are the four readings a host row and a hostmap cell show.
 //
-// Each aggregates by HostLabel so one host is one result whatever its cpu
+// Each aggregates by HostMetricLabel so one host is one result whatever its cpu
 // count or mount table looks like: avg across cpus, sum across the memory
 // states that count as used, max across filesystems (the fullest disk is the
 // one that will page someone).
@@ -107,7 +107,7 @@ var vitalsQueries = []vitalsQuery{
 		name: "cpu",
 		build: func(orgID string) string {
 			idle := Selector(MetricCPUUtilization, orgID, []Matcher{{Label: stateLabel, Value: "idle"}})
-			return "(1 - avg by (" + HostLabel + ") (" + idle + "))"
+			return "(1 - avg by (" + HostMetricLabel + ") (" + idle + "))"
 		},
 		into: func(v *HostVitals, value float64) { p := pct(value); v.CPUPct = &p },
 	},
@@ -115,7 +115,7 @@ var vitalsQueries = []vitalsQuery{
 		name: "mem",
 		build: func(orgID string) string {
 			used := Selector(MetricMemoryUtilization, orgID, []Matcher{{Label: stateLabel, Value: "used"}})
-			return "sum by (" + HostLabel + ") (" + used + ")"
+			return "sum by (" + HostMetricLabel + ") (" + used + ")"
 		},
 		into: func(v *HostVitals, value float64) { p := pct(value); v.MemPct = &p },
 	},
@@ -123,14 +123,14 @@ var vitalsQueries = []vitalsQuery{
 		name: "disk",
 		build: func(orgID string) string {
 			used := Selector(MetricFilesystemUtilization, orgID, []Matcher{{Label: stateLabel, Value: "used"}})
-			return "max by (" + HostLabel + ") (" + used + ")"
+			return "max by (" + HostMetricLabel + ") (" + used + ")"
 		},
 		into: func(v *HostVitals, value float64) { p := pct(value); v.DiskPct = &p },
 	},
 	{
 		name: "load1",
 		build: func(orgID string) string {
-			return "max by (" + HostLabel + ") (" + Selector(MetricLoad1, orgID, nil) + ")"
+			return "max by (" + HostMetricLabel + ") (" + Selector(MetricLoad1, orgID, nil) + ")"
 		},
 		into: func(v *HostVitals, value float64) { load := value; v.Load1 = &load },
 	},
@@ -168,7 +168,7 @@ func (c *Client) Vitals(ctx context.Context, orgID string, lookback time.Duratio
 			return nil, fmt.Errorf("read %s vitals: %w", q.name, err)
 		}
 		for _, p := range points {
-			host := p.labels[HostLabel]
+			host := p.labels[HostMetricLabel]
 			if host == "" {
 				continue
 			}
@@ -228,7 +228,7 @@ func (c *Client) HostSeries(ctx context.Context, orgID, hostIdent string, rng Ti
 	keep := c.retentionFor(ctx, orgID)
 	rng, clamped := clamp(rng, keep.Metrics, time.Now())
 
-	host := Matcher{Label: HostLabel, Value: hostIdent}
+	host := Matcher{Label: HostMetricLabel, Value: hostIdent}
 	win := durationLiteral(step)
 	exprs := map[string]string{
 		"cpu_pct": "100 * (1 - avg (" +
@@ -355,9 +355,9 @@ func (c *Client) Uptime(ctx context.Context, orgID string, rng TimeRange, step t
 
 	matchers := []Matcher{{Label: stateLabel, Value: "idle"}}
 	if hostIdent != "" {
-		matchers = append(matchers, Matcher{Label: HostLabel, Value: hostIdent})
+		matchers = append(matchers, Matcher{Label: HostMetricLabel, Value: hostIdent})
 	}
-	expr := "count by (" + HostLabel + ") (count_over_time(" +
+	expr := "count by (" + HostMetricLabel + ") (count_over_time(" +
 		Selector(MetricCPUUtilization, orgID, matchers) + "[" + durationLiteral(step) + "]))"
 
 	series, err := c.rangeQuery(ctx, account, expr, rng, step)
@@ -379,7 +379,7 @@ func (c *Client) Uptime(ctx context.Context, orgID string, rng TimeRange, step t
 		Hosts: make([]UptimeHost, 0, len(series)), Query: expr,
 	}
 	for _, s := range series {
-		host := s.Labels[HostLabel]
+		host := s.Labels[HostMetricLabel]
 		if host == "" {
 			continue
 		}

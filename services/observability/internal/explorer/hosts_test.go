@@ -13,19 +13,19 @@ import (
 	"time"
 )
 
-// recorder answers each request from a body chosen by the query it carries, and
+// hostRecorder answers each request from a body chosen by the query it carries, and
 // keeps what it was asked. The host queries fan out over several expressions,
 // so the single canned body fakeBackend gives cannot tell them apart.
-type recorder struct {
+type hostRecorder struct {
 	mu      sync.Mutex
 	paths   []string
 	queries []string
 	body    func(query string) string
 }
 
-func newRecorder(t *testing.T, body func(query string) string) (*httptest.Server, *recorder) {
+func newRecorder(t *testing.T, body func(query string) string) (*httptest.Server, *hostRecorder) {
 	t.Helper()
-	rec := &recorder{body: body}
+	rec := &hostRecorder{body: body}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query().Get("query")
 		rec.mu.Lock()
@@ -39,7 +39,7 @@ func newRecorder(t *testing.T, body func(query string) string) (*httptest.Server
 	return srv, rec
 }
 
-func (r *recorder) sawQueryContaining(sub string) bool {
+func (r *hostRecorder) sawQueryContaining(sub string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, q := range r.queries {
