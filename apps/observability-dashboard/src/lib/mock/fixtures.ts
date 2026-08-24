@@ -22,14 +22,20 @@ import type {
   CorrelationScope,
   Dashboard,
   DashboardInput,
+  Host,
+  HostSeriesKey,
+  HostSeriesResult,
+  HostsResult,
   LogsPage,
   LogEntry,
   MetricsResult,
   Quota,
   Resolution,
+  Sample,
   Series,
   Trace,
   TracesResult,
+  UptimeResult,
 } from "@/lib/api/types";
 
 /** Deterministic 32-bit PRNG (mulberry32). */
@@ -536,6 +542,165 @@ export function mockDeleteDashboard(id: string): void {
   const idx = dashboards.findIndex((d) => d.id === id);
   if (idx < 0) throw new ApiError("NOT_FOUND", "대시보드를 찾을 수 없습니다.", 404);
   dashboards.splice(idx, 1);
+}
+
+/* --------------------------------------------------- infrastructure -- */
+
+/**
+ * A demo fleet.
+ *
+ * Two of them are deliberately awkward: one is hot enough to colour the hostmap
+ * red, and one is stale with null readings. A mock where every host is healthy
+ * shows none of the states the screen exists to make visible.
+ */
+const MOCK_HOST_IDENTS = [
+  "ip-10-0-1-14",
+  "ip-10-0-1-27",
+  "ip-10-0-2-8",
+  "ip-10-0-2-31",
+  "ip-10-0-3-5",
+  "ip-10-0-3-19",
+  "worker-gpu-01",
+  "worker-gpu-02",
+  "edge-proxy-a",
+  "edge-proxy-b",
+  "batch-runner-1",
+  "batch-runner-2",
+];
+
+/** Stable per-host readings, so a reload does not reshuffle the heat map. */
+function mockHostVitals(ident: string): {
+  cpu: number;
+  mem: number;
+  disk: number;
+  load: number;
+} {
+  const rand = seeded(hashString("host:" + ident));
+  const cpu = 6 + rand() * 88;
+  return {
+    cpu,
+    mem: 20 + rand() * 70,
+    disk: 12 + rand() * 60,
+    load: Number((rand() * 6).toFixed(2)),
+  };
+}
+
+export function mockHosts(): HostsResult {
+  const now = Date.now();
+  const data: Host[] = MOCK_HOST_IDENTS.map((ident, i) => {
+    // The last two have not reported in over an hour: that is the stale row the
+    // status column and the dimmed hostmap cell are for.
+    const stale = i >= MOCK_HOST_IDENTS.length - 2;
+    const v = mockHostVitals(ident);
+    return {
+      host_ident: ident,
+      service: MOCK_SERVICES[i % MOCK_SERVICES.length],
+      env: i % 3 === 0 ? "staging" : "prod",
+      first_seen_at: new Date(now - 86_400_000 * (3 + i)).toISOString(),
+      last_seen_at: new Date(now - (stale ? 5_400_000 : 20_000 + i * 1_000)).toISOString(),
+      status: stale ? "stale" : "up",
+      cpu_pct: stale ? null : Number(v.cpu.toFixed(1)),
+      mem_pct: stale ? null : Number(v.mem.toFixed(1)),
+      disk_pct: stale ? null : Number(v.disk.toFixed(1)),
+      load1: stale ? null : v.load,
+    };
+  });
+  data.sort((a, b) => (b.cpu_pct ?? -1) - (a.cpu_pct ?? -1));
+  return {
+    data,
+    active_window_sec: 900,
+    total: data.length,
+    active: data.filter((h) => h.status === "up").length,
+    metrics_available: true,
+  };
+}
+
+export function mockHostSeries(args: {
+  hostIdent: string;
+  fromMs: number;
+  toMs: number;
+  stepSec: number;
+}): HostSeriesResult {
+  const { hostIdent, fromMs, toMs, stepSec } = args;
+  const stepMs = Math.max(stepSec, 1) * 1000;
+  const count = Math.min(Math.max(Math.floor((toMs - fromMs) / stepMs), 2), 720);
+  const base = mockHostVitals(hostIdent);
+
+  const shapes: Array<[HostSeriesKey, number, number]> = [
+    ["cpu_pct", base.cpu, 12],
+    ["mem_pct", base.mem, 4],
+    ["disk_pct", base.disk, 0.6],
+    ["load1", base.load, 0.8],
+    ["net_rx_bps", 1_800_000, 500_000],
+    ["net_tx_bps", 900_000, 300_000],
+    ["disk_read_bps", 420_000, 180_000],
+    ["disk_write_bps", 310_000, 140_000],
+  ];
+
+  const series: HostSeriesResult["series"] = {};
+  const queries: HostSeriesResult["queries"] = {};
+  for (const [key, centre, swing] of shapes) {
+    const rand = seeded(hashString(hostIdent + ":" + key));
+    const points: Sample[] = [];
+    for (let i = 0; i < count; i++) {
+      const wave = Math.sin((i / count) * Math.PI * 4) * swing * 0.5;
+      const y = Math.max(0, centre + wave + (rand() - 0.5) * swing);
+      points.push([fromMs + i * stepMs, Number(y.toFixed(3))]);
+    }
+    series[key] = { labels: { series: key }, points };
+    queries[key] = key + '{instance="' + hostIdent + '",klaro_org_id="mock"}';
+  }
+
+  return {
+    host_ident: hostIdent,
+    series,
+    queries,
+    clamped: false,
+    from: new Date(fromMs).toISOString(),
+    to: new Date(toMs).toISOString(),
+  };
+}
+
+export function mockUptime(args: {
+  fromMs: number;
+  toMs: number;
+  stepSec: number;
+  target: number;
+  hostIdent?: string;
+}): UptimeResult {
+  const { fromMs, toMs, stepSec, target, hostIdent } = args;
+  const expected = Math.max(1, Math.floor((toMs - fromMs) / (Math.max(stepSec, 1) * 1000)) + 1);
+  const idents = hostIdent ? [hostIdent] : MOCK_HOST_IDENTS;
+
+  let observedTotal = 0;
+  const hosts = idents.map((ident) => {
+    const rand = seeded(hashString("uptime:" + ident));
+    // Most hosts are near-perfect; a couple have visibly eaten their budget.
+    const ratio = rand() < 0.2 ? 0.94 + rand() * 0.05 : 0.995 + rand() * 0.005;
+    const observed = Math.min(expected, Math.round(expected * ratio));
+    observedTotal += observed;
+    return {
+      host_ident: ident,
+      observed_buckets: observed,
+      expected_buckets: expected,
+      availability: observed / expected,
+      met: observed / expected >= target,
+    };
+  });
+  hosts.sort((a, b) => a.availability - b.availability);
+
+  return {
+    target,
+    step_sec: stepSec,
+    from: new Date(fromMs).toISOString(),
+    to: new Date(toMs).toISOString(),
+    clamped: false,
+    hosts,
+    availability: observedTotal / (expected * idents.length),
+    observed_buckets: observedTotal,
+    expected_buckets: expected * idents.length,
+    query: 'count by (instance) (count_over_time(system_cpu_utilization_ratio{klaro_org_id="mock",state="idle"}[' + stepSec + 's]))',
+  };
 }
 
 export function mockQuota(): Quota {

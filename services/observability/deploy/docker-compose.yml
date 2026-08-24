@@ -110,6 +110,41 @@ services:
       tempo: { condition: service_started }
       loki: { condition: service_started }
 
+  # --- 호스트 메트릭 에이전트 ----------------------------------------------
+  #
+  # 인프라 화면(P1b)이 실제 데이터를 갖도록 로컬 호스트의 cpu/memory/disk/
+  # network/load를 15초마다 게이트웨이로 보낸다. 게이트웨이가 아니라 별도
+  # 컨테이너인 이유는 otel-hostmetrics.yaml 머리말에 적었다(스크레이프에는
+  # 테넌트를 실어 줄 요청 컨텍스트가 없다).
+  #
+  # KLARO_OBS_KEY가 있어야 동작한다. seed-dev.sh가 키를 발급한 뒤 이 서비스만
+  # 다시 띄우므로 보통은 직접 넣을 일이 없다:
+  #   ./deploy/scripts/seed-dev.sh
+  # 키 없이 뜨면 게이트웨이가 401로 거절하고 에이전트는 재시도만 한다 —
+  # 조용히 다른 org로 새는 경로는 없다.
+  otel-hostagent:
+    image: otel/opentelemetry-collector-contrib:0.159.0
+    command: ["--config", "/etc/klaro/otel-hostmetrics.yaml"]
+    environment:
+      KLARO_OBS_KEY: ${KLARO_OBS_KEY:-}
+      KLARO_GATEWAY_ENDPOINT: otel-collector:4317
+      KLARO_HOST_ENV: ${KLARO_HOST_ENV:-dev}
+      # 컨테이너 이름이 아니라 사람이 읽을 수 있는 호스트 이름으로 등록되게
+      # 한다. 이 값이 observability_hosts.host_ident이자 시리즈의 instance
+      # 라벨이 되므로, 재기동마다 바뀌는 컨테이너 ID를 쓰면 호스트가 매번
+      # 새 호스트로 보이고 호스트 쿼터도 함께 부풀어 오른다.
+      OTEL_RESOURCE_ATTRIBUTES: host.name=${KLARO_HOST_NAME:-klaro-dev-host}
+    # 호스트의 /proc·/sys를 보려면 아래 마운트가 필요하다. Docker Desktop에서는
+    # 리눅스 VM의 값이 보이고, 리눅스 서버에서는 진짜 호스트 값이 보인다.
+    # 마운트를 생략해도 컨테이너 자신의 /proc을 읽어 실제 수치가 흐르므로,
+    # 개발에서는 이식성을 위해 마운트하지 않는다(프로덕션 배포는 /hostfs를
+    # 붙이고 config에 root_path를 준다).
+    restart: unless-stopped
+    depends_on:
+      otel-collector: { condition: service_started }
+    volumes:
+      - ./otel-hostmetrics.yaml:/etc/klaro/otel-hostmetrics.yaml:ro
+
   # --- 메트릭: VictoriaMetrics 클러스터 ------------------------------------
   # AccountID 멀티테넌시는 클러스터 구성에만 있다(단일 노드에는 없다).
   # 설계 HOW-8이 요구하는 저장소 계층 격리를 쓰려면 이 3종이 필요하다.
